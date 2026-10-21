@@ -1,0 +1,12 @@
+# Keep this entry in sync with androidconnect/plugin.toml.
+[[plugin]]
+id = "demencia89/androidconnect"
+name = "AndroidConnect"
+version = "2.0.0"
+plugin_api = 40
+author = "demencia89"
+license = "GPL-2.0-only"
+icon = "device-mobile"
+description = "Android status, KDE Connect actions, and an interactive in-panel scrcpy preview. Requires the ui.frame shell patch."
+tags = ["android", "kdeconnect", "scrcpy", "utility"]
+dependencies = ["python3", "adb", "scrcpy", "ffmpeg", "fuser"]
