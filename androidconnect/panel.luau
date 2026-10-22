@@ -14,11 +14,12 @@ local lastScrollAt = 0
 local pendingWindow = nil
 local renameKey, renameText = "", ""
 local sizeIndex, sizeDirection, sizeReady, sizeHovered = 3, -1, false, false
+local hoveredControl = nil
 local SIZE_FACTORS = { 0.60, 0.75, 1.0 }
 local SIZE_WIDTHS = { 560, 620, 680 }
 local SIZE_NAMES = { "small", "medium", "large" }
-local PANEL_INSET, HEADER_HEIGHT = 21, 52
-local SECTION_GAP, BODY_GAP = 9, 21
+local PANEL_INSET, HEADER_HEIGHT = 21, 64
+local SECTION_GAP, BODY_GAP = 14, 24
 local NETWORK_GLYPHS = {
   USB = "usb", ["WI-FI"] = "wifi", ["5G"] = "signal-5g", NR = "signal-5g",
   LTE = "signal-lte", ["4G"] = "signal-4g", HSPA = "signal-h", ["HSPA+"] = "signal-h",
@@ -112,18 +113,20 @@ local function button(key, action, enabled)
 end
 
 local function icon(key, glyph, action, enabled, active, size, glyphSize)
-  size = size or 27
+  size = size or 32
   local allowed = enabled ~= false
+  local hovered = allowed and hoveredControl == key
   return ui.column({
     key = key, width = size, height = size, minWidth = size, minHeight = size,
     align = "center", justify = "center", radius = size / 2,
-    fill = if active then "primary" else "surface_variant",
-    border = if active then "primary/0.65" else "outline/0.45", borderWidth = 1,
+    fill = if active then "primary/0.18" elseif hovered then "primary/0.10" else "surface_variant/0.55",
+    border = if active then "primary/0.4" elseif hovered then "primary/0.25" else "outline/0.22", borderWidth = 1,
     opacity = if allowed then 1 else 0.6, tooltip = tr(key),
     onClick = if allowed then action else nil,
+    onHover = if allowed then "onControlHover" else nil,
   }, {
     ui.glyph({ name = glyph, size = glyphSize or points(13),
-      color = if active then "on_primary" else "primary" }),
+      color = if active or hovered then "primary" else "on_surface" }),
   })
 end
 
@@ -160,15 +163,54 @@ local function brand(name)
   return "Assets/brand-badges/" .. family .. ".svg"
 end
 
-local function metric(glyph, title, value, color)
-  return ui.row({ gap = 6, align = "start" }, {
-    ui.column({ width = 38, minWidth = 38, align = "center" }, {
-      ui.glyph({ name = glyph, size = points(16 * 1.2075), color = "primary" }),
+local function sectionTitle(key)
+  return label({ text = tr(key), fontSize = if sizeIndex == 1 then 11 else 12,
+    fontWeight = "bold", color = "on_surface_variant", maxLines = 1 })
+end
+
+local function metric(glyph, title, value, color, detail)
+  local badgeSize = ({ 34, 42, 50 })[sizeIndex]
+  local values = {
+    label({ text = value, fontSize = ({ 18, 20, 22 })[sizeIndex], fontWeight = "bold",
+      color = color or "on_surface", maxLines = 1 }),
+  }
+  if detail then
+    table.insert(values, label({ text = tr(detail), fontSize = 11, color = "primary", maxLines = 1 }))
+  end
+  return ui.row({ key = title, height = ({ 46, 60, 76 })[sizeIndex], gap = 12, align = "center" }, {
+    ui.column({ width = badgeSize, height = badgeSize, minWidth = badgeSize,
+      align = "center", justify = "center", radius = math.round(badgeSize * 0.3), fill = "surface_variant/0.65",
+    }, {
+      ui.glyph({ name = glyph, size = math.round(badgeSize * 0.52), color = "primary" }),
     }),
-    ui.column({ gap = 2, align = "stretch" }, {
-      caption(title),
-      label({ text = value, fontSize = points(13 * 1.288), fontWeight = "bold", color = color or "on_surface", maxLines = 1 }),
+    ui.column({ gap = 3, flexGrow = 1, minWidth = 0 }, {
+      label({ text = tr(title), fontSize = 12, color = "on_surface_variant", maxLines = 1 }),
+      ui.row({ gap = 7, align = "center" }, values),
     }),
+  })
+end
+
+local function quickAction(key, glyph, action, enabled, active)
+  local allowed = enabled ~= false
+  local hovered = allowed and hoveredControl == key
+  local badgeSize = ({ 30, 36, 44 })[sizeIndex]
+  return ui.column({ key = key, flexGrow = 1, minWidth = 0, height = ({ 70, 86, 108 })[sizeIndex],
+    padding = 8, gap = 6, align = "center", justify = "center", radius = 18,
+    fill = if active then "primary/0.14" elseif hovered then "primary/0.08" else "surface_variant/0.45",
+    border = if active then "primary/0.4" elseif hovered then "primary/0.22" else "outline/0.16", borderWidth = 1,
+    opacity = if allowed then 1 else 0.5, tooltip = tr(key),
+    onClick = if allowed then action else nil,
+    onHover = if allowed then "onControlHover" else nil,
+  }, {
+    ui.column({ width = badgeSize, height = badgeSize, radius = badgeSize / 2,
+      fill = if active then "primary/0.22" elseif hovered then "primary/0.14" else "surface_variant/0.65",
+      align = "center", justify = "center",
+    }, {
+      ui.glyph({ name = glyph, size = math.round(badgeSize * 0.56),
+        color = if active or hovered then "primary" else "on_surface" }),
+    }),
+    label({ text = tr(key), fontSize = if sizeIndex == 1 then 11 else 13, fontWeight = "medium",
+      color = if active or hovered then "primary" else "on_surface", maxLines = 1 }),
   })
 end
 
@@ -270,6 +312,23 @@ local function drawerContent(width, device, active)
   end
   if drawer == "devices" then return deviceControls(width, device) end
   if drawer == "wireless" then return wirelessControls(width) end
+  if drawer == "more" then
+    local kdeReady = device ~= nil and device.paired and device.reachable
+    local function item(key, glyph, action, enabled)
+      return ui.button({ key = key, text = tr(key), glyph = glyph, variant = "ghost",
+        contentAlign = "start", controlSize = "sm", enabled = enabled ~= false, onClick = action })
+    end
+    return {
+      item("actions.devices", "devices", function() toggleDrawer("devices") end),
+      item("actions.browse", "folder", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
+      item("actions.send_file", "send", function() toggleDrawer("share") end, kdeReady),
+      item("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
+      ui.separator({ color = "outline/0.18" }),
+      item("actions.type_text", "keyboard", function() toggleDrawer("text") end, active),
+      item("actions.diagnostics", "info-circle", function() toggleDrawer("info") end),
+      item("actions.settings", "settings", function() noctalia.openSettings() end),
+    }
+  end
   if drawer == "share" then
     return {
       caption("actions.file_path"),
@@ -320,6 +379,11 @@ render = function()
   local contentWidth = panelWidth - PANEL_INSET * 2
   local aspect = if status.screen then status.width / status.height else 597 / 1241
   local phoneWidth = math.floor(phoneHeight * aspect)
+  local maximumPhoneWidth = contentWidth - BODY_GAP - 220
+  if phoneWidth > maximumPhoneWidth then
+    phoneWidth = maximumPhoneWidth
+    phoneHeight = math.floor(phoneWidth / aspect)
+  end
   local navigationScale = math.max(0.75, SIZE_FACTORS[sizeIndex])
   local navigationSize = math.round(42 * navigationScale)
   local navigationGlyphSize = points(10) * (if sizeIndex == 3 then 1 else 0.91)
@@ -332,7 +396,9 @@ render = function()
     })
   end
   local rightWidth = contentWidth - phoneWidth - BODY_GAP
-  local toolsWidth = math.min(rightWidth, if sizeIndex == 1 then 200 else math.round(300 * SIZE_FACTORS[sizeIndex]))
+  local phoneColumnHeight = phoneHeight + SECTION_GAP + navigationSize
+  local minimumBodyHeight = if drawer == "wireless" then 620 elseif drawer then 504 else ({ 478, 586, 704 })[sizeIndex]
+  local bodyHeight = math.max(phoneColumnHeight, minimumBodyHeight)
   local frame = if streaming then ui.frame({ key = "phone", path = status.socket or "",
     width = phoneWidth, height = phoneHeight, radius = 0,
     onPointer = "onFramePointer", onKey = "onFrameKey",
@@ -344,6 +410,7 @@ render = function()
   if drawer then
     local heading = if drawer == "wireless" then "actions.wireless" elseif drawer == "share" then "actions.send_file"
       elseif drawer == "devices" then "actions.devices" elseif drawer == "text" then "actions.type_text"
+      elseif drawer == "more" then "actions.more"
       elseif drawer == "rename" then "actions.rename_device" else "actions.diagnostics"
     local children = {
       ui.row({ align = "center", gap = 8 }, {
@@ -365,44 +432,66 @@ render = function()
     local batteryIcon = if battery < 0 then "battery-exclamation" elseif telemetry.charging then "battery-charging-2"
       elseif battery < 5 then "battery" elseif battery < 25 then "battery-1" elseif battery < 50 then "battery-2"
       elseif battery < 75 then "battery-3" else "battery-4"
-    local children = {
+    local metrics = {
       metric(batteryIcon, "device.battery",
         if battery < 0 then tr("device.unknown") else tostring(battery) .. "%",
-        if battery >= 0 and battery < 20 then "error" elseif battery > 95 then "#75c98a" else "on_surface"),
+        if battery >= 0 and battery < 20 then "error" elseif battery > 95 then "primary" else "on_surface",
+        if telemetry.charging then "device.charging" else nil),
       metric(NETWORK_GLYPHS[string.upper(network)] or "wave-square", "device.network", network),
       metric(if signal < 0 then "antenna-bars-off" else "antenna-bars-" .. tostring(math.clamp(signal + 1, 1, 5)),
         "device.signal", tr("signal." .. strength)),
     }
     if telemetry.notifications ~= nil then
-      table.insert(children, metric("bell", "device.notifications", tostring(telemetry.notifications)))
+      table.insert(metrics, metric("bell", "device.notifications", tostring(telemetry.notifications)))
     end
-    table.insert(children, ui.column({ key = "phone-tools-slot", width = rightWidth, align = "start" }, {
-      ui.row({ key = "phone-tools", width = toolsWidth, height = 39,
-        paddingH = if sizeIndex == 1 then 17 else 13, paddingV = 6, gap = 0,
-        justify = "space_between", align = "center", radius = 39 / 2, fill = "surface_variant/0.7",
-        border = "outline/0", borderWidth = 0,
-      }, {
-        icon("actions.screenshot", "camera", function() command("screenshot", nil, true) end, active),
-        icon(if status.recording then "actions.stop_recording" else "actions.record", "video",
-          function() command("record", nil, true) end, active, status.recording),
-        icon("actions.keep_awake", "moon", function() command("keepAwake", nil, true) end, mirroring, status.keepAwake),
-        icon("actions.dim", "sun", function() command("dim", nil, true) end, mirroring, status.dim),
+    local children = {
+      ui.column({ key = "device-status", gap = 8 }, {
+        sectionTitle("sections.device_status"),
+        ui.separator({ color = "outline/0.18", spacing = 0 }),
+        ui.column({ gap = 6 }, metrics),
       }),
-    }))
+      ui.column({ key = "quick-actions", gap = 10 }, {
+        sectionTitle("sections.quick_actions"),
+        ui.row({ gap = 10 }, {
+          quickAction("actions.screenshot", "camera", function() command("screenshot", nil, true) end, active, false),
+          quickAction(if status.recording then "actions.stop_recording" else "actions.record", "video",
+            function() command("record", nil, true) end, active, status.recording),
+        }),
+        ui.row({ gap = 10 }, {
+          quickAction("actions.keep_awake", "coffee", function() command("keepAwake", nil, true) end,
+            mirroring, status.keepAwake),
+          quickAction("actions.dim", "moon", function() command("dim", nil, true) end, mirroring, status.dim),
+        }),
+      }),
+    }
     if status.error and status.error ~= "" then
       table.insert(children, label({ text = status.error, fontSize = 12, maxLines = 7,
         maxWidth = rightWidth, color = "error" }))
     end
-    info = ui.column({ key = "status", width = rightWidth, gap = 13 * 1.1, paddingV = 6, align = "stretch" }, children)
+    local footer = ui.column({ key = "preview-status", gap = 10 }, {
+      ui.separator({ color = "outline/0.18", spacing = 0 }),
+      ui.row({ gap = 8, align = "center" }, {
+        ui.box({ width = 6, height = 6, radius = 3, fill = if streaming then "primary" else "outline/0.6" }),
+        label({ text = (if streaming then tr("status.live_preview") .. " · " else "")
+          .. tr(if status.audio then "status.audio_on" else "status.audio_off"),
+          fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
+      }),
+    })
+    local contentProps = { key = "status-content", flexGrow = 1, gap = if sizeIndex == 1 then 10 else 16 }
+    local content = if status.error and status.error ~= "" then ui.scroll(contentProps, children)
+      else ui.column(contentProps, children)
+    info = ui.column({ key = "status", width = rightWidth, height = bodyHeight,
+      gap = if sizeIndex == 1 then 10 else 16, paddingV = 6, align = "stretch" }, {
+      content,
+      footer,
+    })
   end
 
-  local phoneColumnHeight = phoneHeight + SECTION_GAP + navigationSize
-  local minimumBodyHeight = if drawer == "wireless" then 620 elseif drawer then 504 else 380
   -- The host supplies 14px; v4's nested 9 + 6 + 6 margins total 21px.
-  panel.setSize(panelWidth, PANEL_INSET * 2 + HEADER_HEIGHT + SECTION_GAP + math.max(phoneColumnHeight, minimumBodyHeight))
+  panel.setSize(panelWidth, PANEL_INSET * 2 + HEADER_HEIGHT + SECTION_GAP + bodyHeight)
   panel.render(ui.column({ padding = PANEL_INSET - 14, gap = SECTION_GAP, align = "stretch" }, {
-    ui.row({ key = "header", height = HEADER_HEIGHT, gap = 5, padding = 9, align = "center",
-      fill = "surface_variant/0.7", radius = HEADER_HEIGHT / 2, border = "outline/0", borderWidth = 0 }, {
+    ui.row({ key = "header", height = HEADER_HEIGHT, gap = 10, paddingH = 12, paddingV = 10, align = "center",
+      fill = "surface_variant/0.5", radius = 22, borderWidth = 0 }, {
       ui.column({ key = "phone-size", width = 34, height = 34, align = "center", justify = "center",
         onClick = "onCyclePhoneSize", onHover = "onSizeHover",
         tooltip = tr("size.tooltip") .. " " .. tr("size." .. SIZE_NAMES[sizeIndex])
@@ -411,7 +500,7 @@ render = function()
         if sizeHovered then ui.glyph({ name = "resize", size = 21, color = "on_surface" })
           else ui.image({ path = brand(originalName), width = 34, height = 34 }),
       }),
-      ui.column({ key = "device-name", flexGrow = 1, minWidth = 0, height = 34, justify = "center",
+      ui.column({ key = "device-name", flexGrow = 1, minWidth = 0, gap = 4, justify = "center",
         tooltip = tr("actions.rename_device"), onClick = if identity ~= "" then function()
           renameKey, renameText = identity, name
           inputRevision += 1
@@ -419,18 +508,20 @@ render = function()
           render()
         end else nil,
       }, {
-        label({ text = name, fontSize = points(13 * 1.55), fontWeight = "bold", maxLines = 1 }),
+        label({ text = name, fontSize = if sizeIndex == 1 then 21 else 24,
+          fontWeight = "bold", color = "on_surface", maxLines = 1 }),
+        ui.row({ gap = 6, align = "center" }, {
+          ui.box({ width = 5, height = 5, radius = 2.5, fill = if active or kdeReady then "primary" else "outline" }),
+          label({ text = tr(if active then "status.adb_connected" elseif kdeReady then "status.kde_connected" else "status.disconnected"),
+            fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
+        }),
       }),
-      ui.row({ key = "header-actions", gap = 4, align = "center" }, {
-        icon("actions.devices", "devices", function() toggleDrawer("devices") end, true, drawer == "devices"),
-        icon("actions.diagnostics", "info-circle", function() toggleDrawer("info") end, true, drawer == "info"),
-        icon("actions.open_window", "maximize", onOpenWindow, active and not status.busy),
+      ui.row({ key = "header-actions", gap = 6, align = "center" }, {
+        icon("actions.open_window", "external-link", onOpenWindow, active and not status.busy),
         icon("actions.audio", if status.audio then "volume" else "volume-off",
           function() command("audio", nil, true) end, active),
         icon("actions.wireless", "wifi", function() toggleDrawer("wireless") end, true, drawer == "wireless"),
-        icon("actions.browse", "device-mobile-search", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
-        icon("actions.send_file", "device-mobile-share", function() toggleDrawer("share") end, kdeReady, drawer == "share"),
-        icon("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
+        icon("actions.more", "dots", function() toggleDrawer("more") end, true, drawer == "more"),
       }),
     }),
     ui.row({ key = "body", gap = BODY_GAP, align = "start" }, {
@@ -445,6 +536,12 @@ render = function()
       info,
     }),
   }))
+end
+
+function onControlHover(entered, key)
+  if entered == "true" then hoveredControl = key
+  elseif hoveredControl == key then hoveredControl = nil end
+  render()
 end
 
 function onRenameDevice()
@@ -492,6 +589,7 @@ function onOpen()
   sizeDirection = status.phoneSizeDirection or (if sizeIndex == 3 then -1 else 1)
   sizeReady = status.phoneSize ~= nil
   sizeHovered = false
+  hoveredControl = nil
   command("open")
   render()
 end
@@ -499,6 +597,7 @@ end
 function onClose()
   opened = false
   pendingWindow = nil
+  hoveredControl = nil
   renameKey, renameText = "", ""
   gesture = nil
   code, text = "", ""

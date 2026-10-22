@@ -1,6 +1,6 @@
 # AndroidConnect for Noctalia v5
 
-This is the native Luau port, version **2.1.0**, published as a development
+This is the native Luau port, version **2.2.0**, published as a development
 preview. It requires a patched Noctalia build with `ui.frame` and `panel.setSize`
 / proposed plugin API 40:
 
@@ -126,7 +126,7 @@ are still required; KDE Connect cannot enable them.
   soon as a reply completes; the companion sizes its bounded send buffer for
   one complete preview frame. Only the latest frame is retained, with no video
   backlog and no increase to the shell's 16 ms polling rate.
-- **Open in window** (maximize icon in the header) stops the embedded preview
+- **Open in window** (external-window icon in the header) stops the embedded preview
   and opens an ordinary scrcpy window for the selected ADB target. The panel
   closes after spawning succeeds; launch errors are reported. The window keeps
   running when the panel closes. Reopening the panel returns to embedded mode;
@@ -139,7 +139,7 @@ are still required; KDE Connect cannot enable them.
   Escape closes the panel and Tab navigates its native controls. Short text
   bursts are batched to avoid starting one ADB process per character.
 - The keyboard drawer still offers an explicit text field and Send text action.
-  Open it from the information drawer; the extra stop/text/wake button row is
+  Open it from **More** or the information drawer; the extra stop/text/wake button row is
   removed from the status view. Closing the panel stops the preview.
 - Right-click the phone preview for **Back**, or click the wheel for **Home**.
   Left-click/drag still taps/swipes. Wheel-click deliberately maps to Home as
@@ -163,11 +163,15 @@ are still required; KDE Connect cannot enable them.
   only the owned scrcpy session. scrcpy owns/restores its screen timeout/power
   settings; closing the panel stops that session. Audio is enabled initially;
   the header's audio button can mute it.
-- Screenshot, recording, keep-awake, and screen-off share a compact rounded
-  pill with the original fixed-size circular buttons and glyphs. Only the pill's
-  width and spacing change with the three panel presets; it stays left-aligned
-  beside the phone preview. Active controls keep their original tint. Startup
-  text and the manual Start preview button are not displayed;
+- Screenshot, recording, keep-awake, and screen-off form a labeled 2×2 quick-action
+  grid beside the phone. Cards, circular icon backplates, and status badges scale
+  with the three panel presets. All surfaces, text, outlines, and accents use the
+  current Noctalia palette; hover and active states use translucent primary tints.
+  Quick-action cards share the actual available width, including inside a scroll
+  viewport, so right-hand cards never rely on a fixed sidebar width. The status
+  area scrolls when showing an error, keeping longer error text
+  accessible without changing the phone geometry. A quiet footer shows the live
+  preview/audio state. Startup text and the manual Start preview button are not displayed;
   actual errors remain visible. Reopen the panel to retry automatic preview.
 - Screenshot and start/stop recording. Screenshots go to the XDG Pictures
   directory's `AndroidConnect` folder, recordings to XDG Videos/`AndroidConnect`.
@@ -175,11 +179,13 @@ are still required; KDE Connect cannot enable them.
   the uniquely named remote file for recovery rather than deleting it.
 - KDE Connect device status, battery/charging, network, signal, notification count,
   pairing/unpairing, ringing, file browsing, and sending a local file by path.
-  Unpairing requires a second confirmation click. Battery percentage is red
-  below 20%, green above 95%, and the normal text color otherwise (also when unknown).
-- The header's device button opens device selection and pairing; the information
-  button opens diagnostics, settings, and text input. Wireless and send-file
-  controls have their own drawers. These replace the status column while open,
+  Unpairing requires a second confirmation click. Battery percentage uses the theme's
+  error color below 20%, primary accent above 95%, and normal text otherwise
+  (also when unknown). Charging is labeled separately.
+- The quieter header keeps Open in window, Audio, Wireless, and **More** visible.
+  **More** contains device selection/pairing, file browsing/sharing, Find phone,
+  text input, diagnostics, and settings. Wireless and send-file controls have
+  their own drawers. These replace the status column while open,
   leaving the phone preview and navigation in place.
 - Device names come from KDE Connect when selected, otherwise the ADB-reported
   model. Click the header name to save a local nickname (up to 80 printable
@@ -194,9 +200,12 @@ are still required; KDE Connect cannot enable them.
 
 ## Current differences from v4
 
-- The main layout follows v4: brand/device header, circular icon actions, framed
-  phone preview on the left, status and utility controls on the right, and three
-  circular navigation buttons. It reuses the v4 brand SVGs and cropped phone
+- The main layout retains v4's framed phone on the left and three circular
+  navigation buttons, with a redesigned brand/device header, compact device
+  status, and labeled quick actions on the right. It uses only Noctalia palette
+  roles, including live primary-tinted hover/active states, so dark/light theme
+  and palette changes do not need plugin-specific colors. It reuses the v4 brand
+  SVGs and cropped phone
   artwork, fitted around the live screen using the original bezel proportions.
   The static phone image uses dark glossy glass instead of a bright wallpaper;
   its bezel and camera cutout are unchanged. It remains visible while disconnected,
@@ -210,12 +219,10 @@ are still required; KDE Connect cannot enable them.
   bezel clicks/scrolls are ignored and drags beyond the screen are clamped.
   Typography uses v4's Adwaita Sans family and medium/
   bold weights, with Qt point sizes converted to native logical pixels. The
-  header, 21px outer inset, 38px status-icon column, and status spacing follow
-  v4's measurements. Your adjusted navigation sizes and proportional utility
-  pill widths are retained. The header and utility pill have fully rounded ends
-  and no outline. The utility pill is 39px tall with unchanged 27px buttons.
-  Circular button borders use 45% opacity (65% when active). There is a
-  9px gap below the header and above navigation, and 21px beside the preview.
+  21px outer inset and adjusted navigation sizes remain unchanged. The header
+  has no outline; circular controls and cards use soft, low-opacity borders.
+  There is a 14px gap below the header and above navigation, and 24px beside
+  the preview. Landscape video is width-limited to leave room for the controls.
   Qt/Pango rasterization and shell-owned blur/shadows
   can still differ; colors continue to follow the active Noctalia theme.
 - Keep the phone in its **natural orientation** (normally portrait). The preview
@@ -291,6 +298,11 @@ The v4-matched typography and spacing were checked in the real patched shell at
 Small, Medium, and Large, including the reconnected Xiaomi 15 Ultra's live video.
 The original size was restored after testing. Comparison screenshots stayed
 local and were not added to the repository.
+The subsequent mockup-inspired redesign was checked in the live shell, including
+Small with four status rows and both right-hand action cards fully visible.
+Isolated Luau checks cover all three sizes, flexible equal-width action cards,
+primary-only hover/active tints, the relocated More actions, disabled/offline
+controls, scrollable errors, and width-limited landscape preview geometry.
 An isolated Luau runtime check also exercised keyboard ordering and scroll
 direction, burst bounds, busy deferral, reversal, drag exclusion, and close/target
 change cancellation against the actual panel script. Further checks covered the
