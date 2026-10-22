@@ -1,4 +1,6 @@
+import base64
 import contextlib
+from concurrent.futures import Future
 import io
 import json
 import os
@@ -12,15 +14,17 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import Mock, patch
 
 PLUGIN = Path(__file__).resolve().parents[1] / "androidconnect"
 sys.path.insert(0, str(PLUGIN))
 import backend
-from video import FrameServer, preview_size
+from video import FrameServer, phone_filter, phone_geometry, preview_size
 
 
 class ParsingTests(unittest.TestCase):
@@ -55,6 +59,43 @@ USB3 offline
         self.assertLessEqual(width, 312)
         self.assertLessEqual(height, 432)
         self.assertEqual(width % 2 + height % 2, 0)
+
+    def test_phone_bezel_fits_without_changing_preview_height(self):
+        self.assertEqual(phone_geometry(538, 1190), {
+            "width": 597, "height": 1241,
+            "screen": {"x": 25, "y": 26, "width": 538, "height": 1190, "radius": 52},
+        })
+        for maximum in (240, 432, 540, 720):
+            for source in ((1080, 2400), (1440, 3200), (2400, 1080)):
+                width, height = preview_size(*source, maximum * 1190 / 1241)
+                phone = phone_geometry(width, height)
+                screen = phone["screen"]
+                self.assertLessEqual(phone["height"], maximum)
+                self.assertLessEqual(phone["width"], 400)
+                self.assertGreater(screen["x"], 0)
+                self.assertGreater(screen["y"], 0)
+                self.assertLess(screen["x"] + width, phone["width"])
+                self.assertLess(screen["y"] + height, phone["height"])
+                self.assertLessEqual(screen["radius"] * 2, min(width, height))
+
+    def test_shared_phone_artwork_is_precropped(self):
+        with (PLUGIN / "Assets" / "phone.png").open("rb") as image:
+            header = image.read(24)
+        self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack("!II", header[16:24]), (597, 1241))
+
+    def test_idle_glass_preserves_artwork_and_screen_geometry(self):
+        root = ET.parse(PLUGIN / "Assets" / "phone-idle.svg").getroot()
+        self.assertEqual(root.get("viewBox"), "0 0 597 1241")
+        nodes = {node.get("id"): node for node in root.iter() if node.get("id")}
+        image = nodes["artwork"].get("{http://www.w3.org/1999/xlink}href")
+        self.assertTrue(image.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(image.split(",", 1)[1], validate=True),
+                         (PLUGIN / "Assets" / "phone.png").read_bytes())
+        screen = nodes["screen"]
+        self.assertEqual([screen.get(key) for key in ("x", "y", "width", "height", "rx")],
+                         ["25", "26", "538", "1190", "52"])
+        self.assertEqual(screen.get("fill"), "url(#glass)")
 
     def test_endpoints(self):
         self.assertEqual(backend.endpoint("192.0.2.10", "40000"), "192.0.2.10:40000")
@@ -270,7 +311,11 @@ class CommandTests(unittest.TestCase):
                     video = frames.call_args.args[1]
                     self.assertLess(video.index("-framerate"), video.index("-i"))
                     self.assertEqual(video[video.index("-framerate") + 1], str(fps))
-                    self.assertNotIn("fps=", video[video.index("-vf") + 1])
+                    self.assertNotIn("fps=", video[video.index("-filter_complex") + 1])
+                    self.assertNotIn("-loop", video)  # Artwork/masks are computed once, not per frame.
+                    self.assertIn(str(PLUGIN / "Assets" / "phone.png"), video)
+                    self.assertEqual(frames.call_args.args[2:4],
+                                     (self.bridge.model["width"], self.bridge.model["height"]))
                     self.assertEqual(video[video.index("-fps_mode") + 1], "passthrough")
             child.return_value.error.assert_not_called()
 
@@ -307,6 +352,18 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.bridge.model["serial"], "")
         self.bridge.set_selection({"kde": "phone1"})
         self.assertEqual(self.bridge.model["serial"], "USB1")
+
+    def test_initial_size_is_large_and_every_user_choice_is_remembered(self):
+        self.assertEqual((self.bridge.model["phoneSize"], self.bridge.model["phoneSizeDirection"]), (3, -1))
+        for size, direction in ((1, 1), (2, -1), (3, -1)):
+            self.bridge.handle({"action": "size", "preset": size, "direction": direction})
+            restored = backend.Bridge(self.path, self.path)
+            self.assertEqual((restored.model["phoneSize"], restored.model["phoneSizeDirection"]), (size, direction))
+
+    def test_invalid_saved_size_falls_back_to_large(self):
+        for value in (None, True, 0, 4, "large"):
+            (self.path / "devices.json").write_text(json.dumps({"phoneSize": value}))
+            self.assertEqual(backend.Bridge(self.path, self.path).model["phoneSize"], 3)
 
     def test_phone_size_is_saved_without_restarting_video(self):
         with patch.object(self.bridge, "start_mirror") as start, patch.object(self.bridge, "stop_mirror") as stop:
@@ -353,6 +410,226 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.bridge.preferences["names"], {})
 
 
+class WirelessTests(unittest.TestCase):
+    setUp = CommandTests.setUp
+    tearDown = CommandTests.tearDown
+    request = CommandTests.request
+
+    def phone(self):
+        self.bridge.model.update(selectedKde="phone1", serial="", configured=True, adb=[], kde=[
+            {"id": "phone1", "addresses": ["192.0.2.10"], "paired": True, "reachable": True},
+            {"id": "phone2", "addresses": ["192.0.2.20"], "paired": True, "reachable": True},
+        ])
+        self.bridge.model["tools"]["adb"] = True
+
+    @staticmethod
+    def service(name="adb-phone", host="192.0.2.10", port="40001", kind="_adb-tls-connect._tcp"):
+        return {"name": name, "host": host, "port": port, "type": kind, "endpoint": backend.endpoint(host, port)}
+
+    def update(self, **result):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.bridge.update_probe(result)
+
+    def finish(self, address=None, error=None):
+        future = Future()
+        self.bridge.reconnect["future"] = future
+        future.set_exception(error) if error else future.set_result(address)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.bridge.poll_reconnect()
+
+    def test_changed_port_and_duplicate_mdns_transport_match_one_phone(self):
+        phone = {"addresses": ["192.0.2.10"]}
+        devices = [{"serial": value, "state": "device"} for value in
+                   ("192.0.2.20:40000", "192.0.2.10:40001", "adb-phone._adb-tls-connect._tcp")]
+        service = self.service()
+        self.assertEqual(backend.resolve_serial(devices, phone, "192.0.2.10:39999", [service]), "192.0.2.10:40001")
+        self.assertEqual(backend.resolve_serial(devices[::2], phone, "192.0.2.10:39999", [service]),
+                         "adb-phone._adb-tls-connect._tcp")
+        service["name"] += "._adb-tls-connect._tcp."
+        self.assertEqual(backend.transport_host(devices[-1]["serial"], [service]), "192.0.2.10")
+
+    def test_ipv6_alias_matching_and_no_device_name_guessing(self):
+        service = self.service(host="2001:db8::10")
+        self.assertEqual(backend.transport_host("adb-phone._adb-tls-connect._tcp", [service]), "2001:db8::10")
+        devices = [{"serial": "[2001:db8::10]:40001", "state": "device"}]
+        self.assertEqual(backend.resolve_serial(devices, {"addresses": ["2001:0db8::10"]}, ""), devices[0]["serial"])
+        self.assertEqual(backend.resolve_serial(devices, {"addresses": [""], "name": "Same phone"}, ""), "")
+
+    def test_selected_missing_kde_phone_never_falls_back_to_another_phone(self):
+        self.phone()
+        self.bridge.model.update(kde=[], adb=[{"serial": "192.0.2.20:40000", "state": "device"}])
+        self.assertEqual(self.bridge.resolved_serial(), "")
+
+    def test_discovery_retries_and_only_connects_the_selected_host(self):
+        clock = SimpleNamespace(now=0)
+        cancel = Mock()
+        cancel.is_set.return_value = False
+        cancel.wait.side_effect = lambda delay: setattr(clock, "now", clock.now + delay)
+        wrong = self.service(host="192.0.2.20")
+        pairing = self.service(kind="_adb-tls-pairing._tcp")
+        with patch("backend.time.monotonic", side_effect=lambda: clock.now), \
+             patch("backend.discover_services", side_effect=[[wrong, pairing], [wrong, self.service()]]), \
+             patch("backend.run", return_value="connected to 192.0.2.10:40001") as run:
+            self.assertEqual(backend.connect_wireless(["192.0.2.10"], cancel, 12), "192.0.2.10:40001")
+            run.assert_called_once_with(["adb", "connect", "192.0.2.10:40001"], timeout=3)
+        self.assertEqual(clock.now, 1)
+
+    def test_failed_old_port_is_rediscovered_and_timeout_is_bounded(self):
+        clock = SimpleNamespace(now=0)
+        cancel = Mock()
+        cancel.is_set.return_value = False
+        cancel.wait.side_effect = lambda delay: setattr(clock, "now", clock.now + delay)
+        with patch("backend.time.monotonic", side_effect=lambda: clock.now), \
+             patch("backend.discover_services", side_effect=[[self.service(port="40000")], [self.service()]]), \
+             patch("backend.run", side_effect=[backend.OperationError("stale port"), "connected to phone"]) as run:
+            self.assertEqual(backend.connect_wireless(["192.0.2.10"], cancel, 12), "192.0.2.10:40001")
+            self.assertEqual(run.call_args_list[0].args[0][-1], "192.0.2.10:40000")
+        clock.now = 0
+        with patch("backend.time.monotonic", side_effect=lambda: clock.now), \
+             patch("backend.discover_services", return_value=[]), patch("backend.run") as run:
+            with self.assertRaisesRegex(backend.OperationError, "timed out"):
+                backend.connect_wireless(["192.0.2.10"], cancel, 3)
+            run.assert_not_called()
+        self.assertEqual(clock.now, 3)
+
+    def test_cancellation_after_discovery_does_not_connect(self):
+        cancel = threading.Event()
+        def discover():
+            cancel.set()
+            return [self.service()]
+        with patch("backend.discover_services", side_effect=discover), patch("backend.run") as run:
+            self.assertIsNone(backend.connect_wireless(["192.0.2.10"], cancel, 12))
+            run.assert_not_called()
+
+    def test_avahi_fallback_is_parsed_without_a_shell(self):
+        text = "=;wlan0;IPv4;adb-phone;_adb-tls-connect._tcp;local;phone.local;192.0.2.10;40001;\n"
+        with patch("backend.shutil.which", return_value="/tool"), \
+             patch("backend.run", side_effect=[backend.OperationError("mdns unavailable"), text]) as run:
+            self.assertEqual(backend.discover_services(), [self.service()])
+            self.assertEqual(run.call_args.args[0], ["avahi-browse", "-rtkp", "_adb-tls-connect._tcp"])
+
+    def test_panel_open_schedules_one_attempt_and_wireless_page_retries(self):
+        self.phone()
+        self.bridge.panel_open = False
+        self.update()
+        self.assertIsNone(self.bridge.reconnect)
+        self.bridge.handle({"action": "open"})
+        self.update()
+        first = self.bridge.reconnect
+        self.assertEqual((first["hosts"], first["timeout"]), (["192.0.2.10"], 12))
+        self.update()
+        self.assertIs(self.bridge.reconnect, first)
+        self.finish(error=backend.OperationError("timed out"))
+        self.assertEqual(self.bridge.model["wirelessState"], "timeout")
+        self.update()
+        self.assertIsNone(self.bridge.reconnect)
+        with patch("backend.run") as run:
+            self.bridge.handle({"action": "wirelessOpen"})
+            run.assert_not_called()  # Scanning is queued, never performed on the UI/input thread.
+        self.assertEqual(self.bridge.reconnect["timeout"], 18)
+
+    def test_success_is_saved_for_selected_phone_then_authorized_by_probe(self):
+        self.phone()
+        self.bridge.request_reconnect()
+        self.finish("192.0.2.10:40001")
+        self.assertEqual(self.bridge.model["serial"], "")
+        self.assertEqual(self.bridge.preferences["profiles"], {"phone1": "192.0.2.10:40001"})
+        self.assertEqual(self.bridge.preferences["wireless"], {"phone1": {"host": "192.0.2.10"}})
+        self.update(adb=[{"serial": "192.0.2.10:40001", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "192.0.2.10:40001")
+
+    def test_switch_or_close_cancels_pending_results(self):
+        self.phone()
+        self.bridge.request_reconnect()
+        job = self.bridge.reconnect
+        self.bridge.set_selection({"kde": "phone2"})
+        self.assertTrue(job["cancel"].is_set())
+        self.assertIsNone(self.bridge.reconnect)
+        self.update(probeSelection="phone1", adb=[{"serial": "192.0.2.10:40001", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "")
+        self.assertEqual(self.bridge.model["selectedKde"], "phone2")
+        self.bridge.request_reconnect()
+        job = self.bridge.reconnect
+        self.bridge.handle({"action": "close"})
+        self.assertTrue(job["cancel"].is_set())
+        self.update()
+        self.assertIsNone(self.bridge.reconnect)
+
+    def test_moved_host_does_not_accept_an_old_connection_result(self):
+        self.phone()
+        self.bridge.request_reconnect()
+        self.bridge.model["kde"][0]["addresses"] = ["192.0.2.30"]
+        self.finish("192.0.2.10:40001")
+        self.assertNotIn("phone1", self.bridge.preferences["profiles"])
+
+    def test_connected_phone_needs_no_scan_and_keeps_explicit_usb_mapping(self):
+        self.phone()
+        self.bridge.preferences["profiles"]["phone1"] = "USB1"
+        self.update(adb=[{"serial": "192.0.2.10:40001", "state": "device"},
+                         {"serial": "USB1", "state": "device"}])
+        self.bridge.handle({"action": "wirelessOpen"})
+        self.assertIsNone(self.bridge.reconnect)
+        self.assertEqual(self.bridge.model["wirelessState"], "connected")
+        self.assertEqual(self.bridge.preferences["profiles"]["phone1"], "USB1")
+        self.update(adb=[{"serial": "USB1", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "USB1")
+
+    def test_mdns_identity_does_not_flip_to_ip_and_restart_preview(self):
+        self.phone()
+        alias = "adb-phone._adb-tls-connect._tcp"
+        self.bridge.model["serial"] = alias
+        self.bridge.preferences["profiles"]["phone1"] = alias
+        result = {"services": [self.service()], "adb": [
+            {"serial": alias, "state": "device"}, {"serial": "192.0.2.10:40001", "state": "device"}]}
+        with patch.object(self.bridge, "stop_mirror") as stop:
+            self.update(**result)
+            self.update(**result)
+            stop.assert_not_called()
+        self.assertEqual(self.bridge.preferences["profiles"]["phone1"], alias)
+
+    def test_adb_only_remembers_host_but_never_chooses_another_phone(self):
+        self.bridge.model.update(serial="", adb=[])
+        self.bridge.model["tools"]["adb"] = True
+        self.bridge.request_reconnect(18, "192.0.2.10")
+        self.finish("192.0.2.10:40001")
+        self.update(adb=[{"serial": "192.0.2.10:40002", "state": "device"},
+                         {"serial": "192.0.2.20:40000", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "192.0.2.10:40002")
+        self.update(adb=[{"serial": "192.0.2.20:40000", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "")
+
+    def test_foreign_host_and_late_wireless_commands_are_rejected(self):
+        self.phone()
+        with self.assertRaises(backend.OperationError):
+            self.bridge.request_reconnect(18, "192.0.2.20")
+        self.request({"action": "wirelessOpen", "kdeTarget": "phone2"})
+        self.assertIsNone(self.bridge.reconnect)
+
+    def test_close_is_processed_while_background_discovery_is_waiting(self):
+        self.phone()
+        self.bridge.config["auto_mirror"] = False
+        self.bridge.request_reconnect()
+        started = threading.Event()
+        def connect(hosts, cancelled, timeout):
+            started.set()
+            cancelled.wait(3)
+        with contextlib.redirect_stdout(io.StringIO()), patch("backend.connect_wireless", side_effect=connect), \
+             patch("backend.probe", return_value={"probeSelection": "phone1"}):
+            thread = threading.Thread(target=self.bridge.loop)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(2))
+                (self.path / "1000000000000-000001.json").write_text('{"action":"close"}')
+                deadline = time.monotonic() + 1
+                while self.bridge.panel_open and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(self.bridge.panel_open)
+            finally:
+                self.bridge.stopped = True
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is needed for real frame tests")
 class VideoTests(unittest.TestCase):
     def receive(self, client, count):
@@ -388,6 +665,39 @@ class VideoTests(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertFalse(frames.capture_thread.is_alive())
             self.assertFalse(frames.server_thread.is_alive())
+
+    def test_real_bezel_is_transparent_and_keeps_video_advancing(self):
+        width, height = 108, 240
+        phone = phone_geometry(width, height)
+        command = ["ffmpeg", "-nostdin", "-v", "error", "-filter_complex_threads", "1",
+                   "-re", "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate=60",
+                   "-threads", "1", "-i", str(PLUGIN / "Assets" / "phone.png"),
+                   "-filter_complex", phone_filter(width, height), "-map", "[phone]",
+                   "-threads", "1", "-fps_mode", "passthrough", "-f", "rawvideo", "pipe:1"]
+        with tempfile.TemporaryDirectory(prefix="ac-bezel-") as directory:
+            path = Path(directory) / "frames.sock"
+            frames = FrameServer(path, command, phone["width"], phone["height"], queue.Queue())
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(5)
+                    client.connect(str(path))
+                    images = []
+                    for _ in range(3):
+                        client.sendall(b"R")
+                        self.assertEqual(struct.unpack("!4sII", self.receive(client, 12)),
+                                         (b"NRF1", phone["width"], phone["height"]))
+                        pixels = self.receive(client, phone["width"] * phone["height"] * 4)
+                        self.assertEqual(pixels[3], 0)  # No rectangular background outside the phone.
+                        center = (phone["height"] // 2 * phone["width"] + phone["width"] // 2) * 4
+                        self.assertEqual(pixels[center + 3], 255)
+                        # The center row is exactly the live screen, not the artwork's wallpaper.
+                        screen = phone["screen"]
+                        row = (screen["y"] + height // 2) * phone["width"] + screen["x"]
+                        images.append(pixels[row * 4:(row + width) * 4])
+                    self.assertNotEqual(images[0], images[-1])
+            finally:
+                frames.stop()
+            self.assertFalse(path.exists())
 
 
 class CompanionTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 # AndroidConnect for Noctalia v5
 
-This is the native Luau port, version **2.0.0**, published as a development
+This is the native Luau port, version **2.1.0**, published as a development
 preview. It requires a patched Noctalia build with `ui.frame` and `panel.setSize`
 / proposed plugin API 40:
 
@@ -60,6 +60,8 @@ recording and close the panel first so media can finish downloading.
 ## Dependencies and setup
 
 - `python3` runs the companion; no Python packages are required.
+- Install the **Adwaita Sans** font for the v4 typography. Fontconfig substitutes
+  another font if it is unavailable, which can change text widths and spacing.
 - KDE Connect status/actions need a running `kdeconnectd` and `busctl`.
   KDE Connect is **optional** for ADB controls and mirroring.
 - Preview/control needs `adb`, `scrcpy`, `ffmpeg`, and `fuser` (usually `psmisc`).
@@ -92,12 +94,25 @@ computer's authorization prompt. For Wi-Fi: enable Wireless debugging on the
 phone and use **Wireless** in the panel. Pairing and connect ports are different.
 The port does not attempt to enable debugging through KDE Connect.
 
-Choose an optional KDE Connect device and the **ADB control target** separately.
-An explicit ADB choice is saved per KDE Connect device. An unconfigured KDE
-Connect selection only auto-matches an unambiguous wireless address; it never
-guesses a USB phone by its name. In ADB-only mode, a single authorized target can
-be selected automatically. With multiple authorized targets, choose explicitly.
-An offline saved target never falls back to a different phone.
+Choose the KDE Connect phone; its ADB target is matched automatically by its
+reachable addresses, including mDNS-named ADB transports. Duplicate IP/mDNS
+transports for the same phone do not require a chooser. Old ports no longer pin
+the plugin to a disconnected endpoint. Explicit USB associations remain valid;
+it never guesses USB identity from a device name. KDE Connect is still optional:
+ADB-only mode selects a single authorized phone automatically and shows a chooser
+only for multiple targets or an unavailable saved target.
+
+Opening the panel starts a bounded 12-second wireless reconnect attempt when the
+selected phone has no ADB connection. Opening **Wireless** prefills that phone's
+host, clears volatile pairing/connection ports, and retries for up to 18 seconds.
+**Find port** retries manually. Discovery uses ADB mDNS and optional `avahi-browse`,
+only for the selected/saved host's advertised TLS connect services; it does not
+scan network ports. Changed ports are rediscovered and successful connections
+are associated with that phone. Pairing by code also starts connect-port discovery.
+Close/switch cancels pending attempts, and stale results cannot retarget another
+phone. Discovery runs separately from input handling and does not spam retries
+after its timeout. Android Wireless debugging and initial ADB pairing/authorization
+are still required; KDE Connect cannot enable them.
 
 ## Controls
 
@@ -132,11 +147,12 @@ An offline saved target never falls back to a different phone.
 - Hover the brand logo to reveal its resize icon, then click to cycle
   Small (60%) → Medium (75%) → Large (100%) → Medium → Small, as in v4.
   The phone and panel resize without restarting the mirror. The selected size
-  and cycling direction are saved. The preview-height setting defines Large.
+  and cycling direction are saved. Large is the initial default; any saved size
+  takes precedence on subsequent opens/restarts. The preview-height setting defines Large.
   Navigation buttons use 32px for both Small and Medium, and the unchanged 42px
   for Large. Button centers stay at 18%, 50%, and 82% of the preview width, so
   spacing and side insets scale proportionally while Home stays centered.
-  The main view fits its preview/navigation height with the same 14px outer
+  The main view fits its preview/navigation height with the same 21px outer
   inset as the sides; setup drawers retain extra height when needed for their controls.
 - Hover the live phone preview and use the mouse wheel to scroll. Wheel/tilt
   steps become short vertical/horizontal ADB swipes near the pointer, with
@@ -180,10 +196,28 @@ An offline saved target never falls back to a different phone.
 
 - The main layout follows v4: brand/device header, circular icon actions, framed
   phone preview on the left, status and utility controls on the right, and three
-  circular navigation buttons. It reuses the v4 brand SVGs, but displays the live
-  preview with rounded corners and a fitted 2px phone-like rim, without any
-  background phone artwork. QML-specific blur/shadow rendering and exact font/theme metrics are not
-  pixel-identical; colors continue to follow the active Noctalia theme.
+  circular navigation buttons. It reuses the v4 brand SVGs and cropped phone
+  artwork, fitted around the live screen using the original bezel proportions.
+  The static phone image uses dark glossy glass instead of a bright wallpaper;
+  its bezel and camera cutout are unchanged. It remains visible while disconnected,
+  starting, or in an error state, even without the companion/video dependencies. Live video replaces
+  it when ready, using the same dimensions at every panel size.
+  The existing FFmpeg companion prepares the artwork and antialiased screen mask
+  once, then composites the video without another process, frame queue, or shell
+  API change. Outer corners remain transparent; the old wallpaper is cut out of
+  the screen opening. The whole phone scales together at all three sizes while
+  retaining the preview-height setting. Pointer coordinates exclude the bezel;
+  bezel clicks/scrolls are ignored and drags beyond the screen are clamped.
+  Typography uses v4's Adwaita Sans family and medium/
+  bold weights, with Qt point sizes converted to native logical pixels. The
+  header, 21px outer inset, 38px status-icon column, and status spacing follow
+  v4's measurements. Your adjusted navigation sizes and proportional utility
+  pill widths are retained. The header and utility pill have fully rounded ends
+  and no outline. The utility pill is 39px tall with unchanged 27px buttons.
+  Circular button borders use 45% opacity (65% when active). There is a
+  9px gap below the header and above navigation, and 21px beside the preview.
+  Qt/Pango rasterization and shell-owned blur/shadows
+  can still differ; colors continue to follow the active Noctalia theme.
 - Keep the phone in its **natural orientation** (normally portrait). The preview
   is locked to that orientation, and touch input verifies orientation instead
   of knowingly forwarding rotated coordinates. Arbitrary live rotation needs
@@ -234,8 +268,11 @@ late-command rejection, remote text quoting, secret handling, single-companion
 locking, private runtime cleanup, windowless launch with audio on/off, readiness
 from actual frames rather than logs, standalone window handoff/lifecycle and failed
 launches, ADB battery parsing, validated wheel-swipe
-coordinates, and actual FFmpeg
-frames/reconnects. Socket
+coordinates, fitted bezel geometry, and actual FFmpeg
+frames/reconnects, including transparent composed corners and advancing video.
+Wireless tests cover changed ports, IP/mDNS aliases, Avahi fallback, retry limits,
+per-phone association, stale results, and closing while discovery is running.
+Socket
 tests need a normal host session rather than a sandbox that forbids Unix bind.
 The four Luau entries were also compiled with Noctalia's vendored Luau compiler.
 
@@ -250,6 +287,10 @@ A local after screenshot was kept outside the repository because the surrounding
 desktop contains private content.
 
 The user confirmed direct PC keyboard typing and wheel scrolling in the live phone preview.
+The v4-matched typography and spacing were checked in the real patched shell at
+Small, Medium, and Large, including the reconnected Xiaomi 15 Ultra's live video.
+The original size was restored after testing. Comparison screenshots stayed
+local and were not added to the repository.
 An isolated Luau runtime check also exercised keyboard ordering and scroll
 direction, burst bounds, busy deferral, reversal, drag exclusion, and close/target
 change cancellation against the actual panel script. Further checks covered the

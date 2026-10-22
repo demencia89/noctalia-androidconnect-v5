@@ -13,7 +13,9 @@
     "kde": "KDE Connect device (optional)",
     "adb": "ADB control target",
     "adb_only": "ADB only — no KDE Connect",
-    "choose_adb": "Automatic / choose an authorized target"
+    "choose_adb": "Automatic / choose an authorized target",
+    "automatic": "ADB target — matched automatically to this phone",
+    "waiting_adb": "Waiting for this phone’s ADB connection. Wireless discovery will retry automatically."
   },
   "device": { "battery": "Battery", "notifications": "Notifications", "network": "Network", "signal": "Signal", "unknown": "Unknown" },
   "signal": { "unknown": "Unknown", "none": "No signal", "weak": "Weak", "fair": "Fair", "good": "Good", "excellent": "Excellent" },
@@ -47,6 +49,10 @@
     "local_only": "Saved only in AndroidConnect. Leave blank to restore the original name."
   },
   "wireless": {
+    "idle": "Select a phone or enter its host to discover Wireless ADB.",
+    "scanning": "Finding this phone’s current Wireless ADB port and reconnecting…",
+    "connected": "Wireless ADB connected. The control target is selected automatically.",
+    "timeout": "No connection yet. Enable Wireless debugging and pair if needed, then use Find port to retry.",
     "scan_qr": "On Android, choose Pair device with QR code and scan this code.",
     "instructions": "Android → Developer options → Wireless debugging. Pairing and connect ports are different. KDE Connect cannot enable Android debugging for you.",
     "host": "Phone IP address / hostname", "pair_port": "Pairing port", "code": "Six-digit pairing code",
@@ -54,8 +60,8 @@
     "qr": "Pair by QR code", "cancel_qr": "Cancel QR pairing"
   },
   "notice": {
-    "screenshot": "Screenshot saved", "recording": "Recording saved", "paired": "ADB paired. Connect using the phone’s current connect port.",
-    "connected": "ADB connected. Select the target if more than one phone is available.", "qr_expired": "QR pairing timed out. Generate a new code to retry."
+    "screenshot": "Screenshot saved", "recording": "Recording saved", "paired": "ADB paired. Finding the phone’s current connect port automatically.",
+    "connected": "ADB connected. AndroidConnect will match it to the selected phone.", "qr_expired": "QR pairing timed out. Generate a new code to retry."
   },
   "errors": {
     "action": "AndroidConnect could not complete the action.", "video": "The live feed stopped.",

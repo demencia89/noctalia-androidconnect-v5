@@ -13,15 +13,30 @@ local pendingScroll = nil
 local lastScrollAt = 0
 local pendingWindow = nil
 local renameKey, renameText = "", ""
-local sizeIndex, sizeDirection, sizeReady, sizeHovered = 1, 1, false, false
+local sizeIndex, sizeDirection, sizeReady, sizeHovered = 3, -1, false, false
 local SIZE_FACTORS = { 0.60, 0.75, 1.0 }
 local SIZE_WIDTHS = { 560, 620, 680 }
 local SIZE_NAMES = { "small", "medium", "large" }
+local PANEL_INSET, HEADER_HEIGHT = 21, 52
+local SECTION_GAP, BODY_GAP = 9, 21
+local NETWORK_GLYPHS = {
+  USB = "usb", ["WI-FI"] = "wifi", ["5G"] = "signal-5g", NR = "signal-5g",
+  LTE = "signal-lte", ["4G"] = "signal-4g", HSPA = "signal-h", ["HSPA+"] = "signal-h",
+  ["H+"] = "signal-h", H = "signal-h", UMTS = "signal-3g", WCDMA = "signal-3g",
+  EVDO = "signal-3g", CDMA2000 = "signal-3g", CDMA = "signal-3g", ["3G"] = "signal-3g",
+  EDGE = "signal-e", E = "signal-e", GPRS = "signal-g", G = "signal-g", GSM = "signal-2g",
+  IDEN = "signal-2g", ["2G"] = "signal-2g",
+}
+
+-- v4 NText/NIcon use points; native controls use logical pixels at 96 DPI.
+local function points(size) return size * 96 / 72 end
 
 local function tr(key) return noctalia.tr(key) end
 
 local function label(props)
-  props.fontFamily = "sans-serif"
+  props.fontFamily = "Adwaita Sans"
+  props.fontSize = props.fontSize or points(11)
+  props.fontWeight = props.fontWeight or "medium"
   return ui.label(props)
 end
 
@@ -80,11 +95,16 @@ end
 local function toggleDrawer(name)
   drawer = if drawer == name then nil else name
   confirmUnpair = false
+  if drawer == "wireless" then
+    host, pairPort, connectPort, code = status.wirelessHost or "", "", "", ""
+    inputRevision += 1
+    command("wirelessOpen", { kdeTarget = status.selectedKde or "" })
+  end
   render()
 end
 
 local function caption(key)
-  return label({ text = tr(key), fontSize = 12, color = "on_surface_variant", maxLines = 2 })
+  return label({ text = tr(key), fontSize = points(10 * 1.15), color = "on_surface_variant", maxLines = 1 })
 end
 
 local function button(key, action, enabled)
@@ -92,18 +112,18 @@ local function button(key, action, enabled)
 end
 
 local function icon(key, glyph, action, enabled, active, size, glyphSize)
-  size = size or 30
+  size = size or 27
   local allowed = enabled ~= false
   return ui.column({
     key = key, width = size, height = size, minWidth = size, minHeight = size,
     align = "center", justify = "center", radius = size / 2,
-    fill = if active then "primary/0.18" else "surface_variant/0.45",
-    border = if active then "primary/0.65" else "outline/0.35", borderWidth = 1,
-    opacity = if allowed then 1 else 0.35, tooltip = tr(key),
+    fill = if active then "primary" else "surface_variant",
+    border = if active then "primary/0.65" else "outline/0.45", borderWidth = 1,
+    opacity = if allowed then 1 else 0.6, tooltip = tr(key),
     onClick = if allowed then action else nil,
   }, {
-    ui.glyph({ name = glyph, size = glyphSize or (if size > 36 then 17 else 15),
-      color = if active then "primary" else "on_surface" }),
+    ui.glyph({ name = glyph, size = glyphSize or points(13),
+      color = if active then "on_primary" else "primary" }),
   })
 end
 
@@ -141,11 +161,13 @@ local function brand(name)
 end
 
 local function metric(glyph, title, value, color)
-  return ui.row({ gap = 12, align = "start" }, {
-    ui.glyph({ name = glyph, size = 23, width = 30, color = "on_surface_variant" }),
+  return ui.row({ gap = 6, align = "start" }, {
+    ui.column({ width = 38, minWidth = 38, align = "center" }, {
+      ui.glyph({ name = glyph, size = points(16 * 1.2075), color = "primary" }),
+    }),
     ui.column({ gap = 2, align = "stretch" }, {
       caption(title),
-      label({ text = value, fontSize = 22, fontWeight = "bold", color = color or "on_surface", maxLines = 1 }),
+      label({ text = value, fontSize = points(13 * 1.288), fontWeight = "bold", color = color or "on_surface", maxLines = 1 }),
     }),
   })
 end
@@ -172,12 +194,19 @@ local function deviceControls(width, device)
       confirmUnpair = false
       command("select", { kde = entry and entry.id or "" })
     end }),
-    caption("devices.adb"),
-    ui.select({ key = "adb", width = width, options = adbNames, selectedIndex = adbIndex, onChange = function(value)
+  }
+  local needsAdbChoice = not device and (#adbEntries > 2 or (#adbEntries == 2 and (not status.serial or status.serial == "")))
+  if needsAdbChoice then
+    table.insert(children, caption("devices.adb"))
+    table.insert(children, ui.select({ key = "adb", width = width, options = adbNames, selectedIndex = adbIndex, onChange = function(value)
       gesture = nil
       command("select", { serial = adbEntries[(tonumber(value) or 0) + 1] or "" })
-    end }),
-  }
+    end }))
+  else
+    table.insert(children, caption("devices.automatic"))
+    table.insert(children, label({ text = if status.serial and status.serial ~= "" then tr("status.connected")
+      else tr("devices.waiting_adb"), fontSize = 12, maxLines = 3, maxWidth = width }))
+  end
   if device then
     table.insert(children, ui.row({ gap = 8 }, {
       button("actions.pair", function() command("pair", { kdeTarget = device.id }) end, not device.paired),
@@ -188,7 +217,7 @@ local function deviceControls(width, device)
     }))
   end
   for _, entry in status.adb or {} do
-    if entry.state ~= "device" then
+    if not device and entry.state ~= "device" then
       table.insert(children, label({ text = entry.serial .. ": " .. entry.state, color = "error", maxLines = 2 }))
     end
   end
@@ -206,22 +235,26 @@ local function wirelessControls(width)
   end
   return {
     label({ text = tr("wireless.instructions"), fontSize = 12, color = "on_surface_variant", maxLines = 5, maxWidth = width }),
+    label({ text = tr("wireless." .. (status.wirelessState or "idle")), fontSize = 12,
+      color = if status.wirelessState == "timeout" then "error" else "on_surface_variant", maxLines = 4, maxWidth = width }),
     ui.input({ key = "host", value = host, controlSize = "sm", placeholder = tr("wireless.host"), onChange = function(value) host = value end }),
     ui.input({ key = "pair-port", value = pairPort, controlSize = "sm", placeholder = tr("wireless.pair_port"), onChange = function(value) pairPort = value end }),
     ui.input({ key = "code-" .. inputRevision, value = code, password = true, controlSize = "sm",
       placeholder = tr("wireless.code"), onChange = function(value) code = value end }),
     button("wireless.pair", function()
-      command("pairAdb", { host = host, port = pairPort, code = code })
+      command("pairAdb", { host = host, port = pairPort, code = code, kdeTarget = status.selectedKde or "" })
       code = ""; inputRevision += 1; render()
     end),
     ui.separator(),
     ui.input({ key = "connect-port", value = connectPort, controlSize = "sm",
       placeholder = tr("wireless.connect_port"), onChange = function(value) connectPort = value end }),
     ui.row({ gap = 8 }, {
-      button("wireless.connect", function() command("connectAdb", { host = host, port = connectPort }) end),
-      button("wireless.discover", function() command("autoConnect", { host = host }) end),
+      button("wireless.connect", function() command("connectAdb", { host = host, port = connectPort,
+        kdeTarget = status.selectedKde or "" }) end),
+      button("wireless.discover", function() command("autoConnect", { host = host,
+        kdeTarget = status.selectedKde or "" }) end, status.wirelessState ~= "scanning"),
     }),
-    button("wireless.qr", function() command("qr") end),
+    button("wireless.qr", function() command("qr", { kdeTarget = status.selectedKde or "" }) end),
   }
 end
 
@@ -284,13 +317,12 @@ render = function()
   local name = deviceName(identity, originalName)
   local phoneHeight = math.floor(math.clamp(noctalia.getConfig("preview_height") or 720, 240, 720) * SIZE_FACTORS[sizeIndex])
   local panelWidth = SIZE_WIDTHS[sizeIndex]
-  local contentWidth = panelWidth - 28
-  local aspect = if status.sourceWidth and status.sourceWidth > 0 then status.sourceWidth / status.sourceHeight else 538 / 1190
-  local screenWidth = math.min(360, math.floor(phoneHeight * aspect))
-  local phoneWidth = screenWidth + 4
+  local contentWidth = panelWidth - PANEL_INSET * 2
+  local aspect = if status.screen then status.width / status.height else 597 / 1241
+  local phoneWidth = math.floor(phoneHeight * aspect)
   local navigationScale = math.max(0.75, SIZE_FACTORS[sizeIndex])
   local navigationSize = math.round(42 * navigationScale)
-  local navigationGlyphSize = math.round(17 * navigationScale)
+  local navigationGlyphSize = points(10) * (if sizeIndex == 3 then 1 else 0.91)
   local function navigationButton(key, glyph, androidKey)
     return ui.column({ key = key .. "-slot", width = phoneWidth * 0.32, height = navigationSize,
       align = "center", justify = "center",
@@ -299,15 +331,13 @@ render = function()
         active, false, navigationSize, navigationGlyphSize),
     })
   end
-  local corner = math.max(12, phoneHeight * 44.3 / 1190)
-  local rightWidth = contentWidth - phoneWidth - 18
-  local toolsWidth = math.min(rightWidth, math.round(300 * SIZE_FACTORS[sizeIndex]))
-  local frame = ui.column({ key = "phone-rim", width = phoneWidth, padding = 2,
-    radius = corner + 2, fill = "#08090c", border = "outline/0.65", borderWidth = 1,
-  }, {
-    ui.frame({ key = "phone", path = if mirroring then status.socket or "" else "",
-      width = screenWidth, height = phoneHeight, radius = corner,
-      onPointer = "onFramePointer", onKey = "onFrameKey" }),
+  local rightWidth = contentWidth - phoneWidth - BODY_GAP
+  local toolsWidth = math.min(rightWidth, if sizeIndex == 1 then 200 else math.round(300 * SIZE_FACTORS[sizeIndex]))
+  local frame = if streaming then ui.frame({ key = "phone", path = status.socket or "",
+    width = phoneWidth, height = phoneHeight, radius = 0,
+    onPointer = "onFramePointer", onKey = "onFrameKey",
+  }) else ui.image({ key = "phone-placeholder", path = "Assets/phone-idle.svg",
+    width = phoneWidth, height = phoneHeight, fit = "stretch",
   })
 
   local info
@@ -332,19 +362,25 @@ render = function()
     local signal = telemetry.signal or -1
     local strength = if signal < 0 then "unknown" elseif signal == 0 then "none" elseif signal == 1 then "weak"
       elseif signal == 2 then "fair" elseif signal == 3 then "good" else "excellent"
+    local batteryIcon = if battery < 0 then "battery-exclamation" elseif telemetry.charging then "battery-charging-2"
+      elseif battery < 5 then "battery" elseif battery < 25 then "battery-1" elseif battery < 50 then "battery-2"
+      elseif battery < 75 then "battery-3" else "battery-4"
     local children = {
-      metric(if telemetry.charging then "battery-charging" else "battery", "device.battery",
+      metric(batteryIcon, "device.battery",
         if battery < 0 then tr("device.unknown") else tostring(battery) .. "%",
         if battery >= 0 and battery < 20 then "error" elseif battery > 95 then "#75c98a" else "on_surface"),
-      metric(if network == "USB" then "usb" else "antenna-bars-5", "device.network", network),
-      metric("antenna-bars-" .. tostring(math.clamp(signal + 1, 1, 5)), "device.signal", tr("signal." .. strength)),
+      metric(NETWORK_GLYPHS[string.upper(network)] or "wave-square", "device.network", network),
+      metric(if signal < 0 then "antenna-bars-off" else "antenna-bars-" .. tostring(math.clamp(signal + 1, 1, 5)),
+        "device.signal", tr("signal." .. strength)),
     }
     if telemetry.notifications ~= nil then
       table.insert(children, metric("bell", "device.notifications", tostring(telemetry.notifications)))
     end
     table.insert(children, ui.column({ key = "phone-tools-slot", width = rightWidth, align = "start" }, {
-      ui.row({ key = "phone-tools", width = toolsWidth, height = 42, padding = 6, gap = 0,
-        justify = "space_between", align = "center", radius = 22, fill = "surface_variant/0.5",
+      ui.row({ key = "phone-tools", width = toolsWidth, height = 39,
+        paddingH = if sizeIndex == 1 then 17 else 13, paddingV = 6, gap = 0,
+        justify = "space_between", align = "center", radius = 39 / 2, fill = "surface_variant/0.7",
+        border = "outline/0", borderWidth = 0,
       }, {
         icon("actions.screenshot", "camera", function() command("screenshot", nil, true) end, active),
         icon(if status.recording then "actions.stop_recording" else "actions.record", "video",
@@ -357,25 +393,25 @@ render = function()
       table.insert(children, label({ text = status.error, fontSize = 12, maxLines = 7,
         maxWidth = rightWidth, color = "error" }))
     end
-    info = ui.column({ key = "status", width = rightWidth, gap = 20, paddingV = 12, align = "stretch" }, children)
+    info = ui.column({ key = "status", width = rightWidth, gap = 13 * 1.1, paddingV = 6, align = "stretch" }, children)
   end
 
-  local phoneColumnHeight = phoneHeight + 4 + 10 + navigationSize
-  local minimumBodyHeight = if drawer then 504 else 380
-  -- Match the host's 14px inset on every side, plus header and body spacing.
-  panel.setSize(panelWidth, 28 + 54 + 14 + math.max(phoneColumnHeight, minimumBodyHeight))
-  panel.render(ui.column({ gap = 14, align = "stretch" }, {
-    ui.row({ key = "header", height = 54, gap = 7, paddingH = 8, paddingV = 8, align = "center",
-      fill = "surface_variant/0.5", radius = 25 }, {
-      ui.column({ key = "phone-size", width = 30, height = 30, align = "center", justify = "center",
+  local phoneColumnHeight = phoneHeight + SECTION_GAP + navigationSize
+  local minimumBodyHeight = if drawer == "wireless" then 620 elseif drawer then 504 else 380
+  -- The host supplies 14px; v4's nested 9 + 6 + 6 margins total 21px.
+  panel.setSize(panelWidth, PANEL_INSET * 2 + HEADER_HEIGHT + SECTION_GAP + math.max(phoneColumnHeight, minimumBodyHeight))
+  panel.render(ui.column({ padding = PANEL_INSET - 14, gap = SECTION_GAP, align = "stretch" }, {
+    ui.row({ key = "header", height = HEADER_HEIGHT, gap = 5, padding = 9, align = "center",
+      fill = "surface_variant/0.7", radius = HEADER_HEIGHT / 2, border = "outline/0", borderWidth = 0 }, {
+      ui.column({ key = "phone-size", width = 34, height = 34, align = "center", justify = "center",
         onClick = "onCyclePhoneSize", onHover = "onSizeHover",
         tooltip = tr("size.tooltip") .. " " .. tr("size." .. SIZE_NAMES[sizeIndex])
           .. " (" .. tostring(SIZE_FACTORS[sizeIndex] * 100) .. "%)",
       }, {
         if sizeHovered then ui.glyph({ name = "resize", size = 21, color = "on_surface" })
-          else ui.image({ path = brand(originalName), width = 30, height = 30 }),
+          else ui.image({ path = brand(originalName), width = 34, height = 34 }),
       }),
-      ui.column({ key = "device-name", flexGrow = 1, minWidth = 0, height = 30, justify = "center",
+      ui.column({ key = "device-name", flexGrow = 1, minWidth = 0, height = 34, justify = "center",
         tooltip = tr("actions.rename_device"), onClick = if identity ~= "" then function()
           renameKey, renameText = identity, name
           inputRevision += 1
@@ -383,20 +419,22 @@ render = function()
           render()
         end else nil,
       }, {
-        label({ text = name, fontSize = 25, fontWeight = "bold", maxLines = 1 }),
+        label({ text = name, fontSize = points(13 * 1.55), fontWeight = "bold", maxLines = 1 }),
       }),
-      icon("actions.devices", "devices", function() toggleDrawer("devices") end, true, drawer == "devices"),
-      icon("actions.diagnostics", "info-circle", function() toggleDrawer("info") end, true, drawer == "info"),
-      icon("actions.open_window", "maximize", onOpenWindow, active and not status.busy),
-      icon("actions.audio", if status.audio then "volume" else "volume-off",
-        function() command("audio", nil, true) end, active, status.audio),
-      icon("actions.wireless", "wifi", function() toggleDrawer("wireless") end, true, drawer == "wireless"),
-      icon("actions.browse", "device-mobile-search", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
-      icon("actions.send_file", "device-mobile-share", function() toggleDrawer("share") end, kdeReady, drawer == "share"),
-      icon("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
+      ui.row({ key = "header-actions", gap = 4, align = "center" }, {
+        icon("actions.devices", "devices", function() toggleDrawer("devices") end, true, drawer == "devices"),
+        icon("actions.diagnostics", "info-circle", function() toggleDrawer("info") end, true, drawer == "info"),
+        icon("actions.open_window", "maximize", onOpenWindow, active and not status.busy),
+        icon("actions.audio", if status.audio then "volume" else "volume-off",
+          function() command("audio", nil, true) end, active),
+        icon("actions.wireless", "wifi", function() toggleDrawer("wireless") end, true, drawer == "wireless"),
+        icon("actions.browse", "device-mobile-search", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
+        icon("actions.send_file", "device-mobile-share", function() toggleDrawer("share") end, kdeReady, drawer == "share"),
+        icon("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
+      }),
     }),
-    ui.row({ key = "body", gap = 18, align = "start" }, {
-      ui.column({ key = "phone-column", width = phoneWidth, gap = 10, align = "center" }, {
+    ui.row({ key = "body", gap = BODY_GAP, align = "start" }, {
+      ui.column({ key = "phone-column", width = phoneWidth, gap = SECTION_GAP, align = "center" }, {
         frame,
         ui.row({ width = phoneWidth, paddingH = phoneWidth * 0.02, gap = 0 }, {
           navigationButton("navigation.back", "arrow-back", 4),
@@ -449,8 +487,9 @@ function onOpen()
   gesture = nil
   drawer = nil
   status = noctalia.state.get("status") or {}
-  sizeIndex = status.phoneSize or 1
-  sizeDirection = status.phoneSizeDirection or 1
+  host = status.wirelessHost or ""
+  sizeIndex = status.phoneSize or 3
+  sizeDirection = status.phoneSizeDirection or (if sizeIndex == 3 then -1 else 1)
   sizeReady = status.phoneSize ~= nil
   sizeHovered = false
   command("open")
@@ -479,6 +518,17 @@ function onFramePointer(kind, payload)
   if kind == "cancel" then gesture = nil; return end
   local position = noctalia.json.decode(payload)
   if type(position) ~= "table" then return end
+  local screen = status.screen
+  if not screen then return end
+  -- The streamed image includes the bezel; Android coordinates must not.
+  local x, y = position.x * status.width - screen.x, position.y * status.height - screen.y
+  local radius = screen.radius
+  local dx = x - math.clamp(x, radius, screen.width - radius)
+  local dy = y - math.clamp(y, radius, screen.height - radius)
+  if kind == "press" or kind == "scroll" then
+    if x < 0 or x > screen.width or y < 0 or y > screen.height or dx * dx + dy * dy > radius * radius then return end
+  end
+  position.x, position.y = math.clamp(x / screen.width, 0, 1), math.clamp(y / screen.height, 0, 1)
   if kind == "scroll" then
     if status.phase ~= "streaming" or gesture then return end
     flushTyping()
@@ -549,6 +599,16 @@ end
 
 noctalia.state.watch("status", function(value)
   if type(value) ~= "table" then return end
+  if value.selectedKde ~= status.selectedKde then
+    host, pairPort, connectPort, code = value.wirelessHost or "", "", "", ""
+    inputRevision += 1
+    if drawer == "wireless" then
+      command("wirelessOpen", { kdeTarget = value.selectedKde or "" })
+    end
+  elseif drawer == "wireless" and host == "" then
+    host = value.wirelessHost or ""
+  end
+  if drawer == "wireless" and value.wirelessState == "connected" then connectPort = value.wirelessPort or "" end
   if value.serial ~= status.serial then pendingWindow = nil end
   if opened and pendingWindow and value.windowRequest == pendingWindow then
     pendingWindow = nil
@@ -557,7 +617,7 @@ noctalia.state.watch("status", function(value)
     return
   end
   if not sizeReady and value.phoneSize then
-    sizeIndex, sizeDirection = value.phoneSize, value.phoneSizeDirection or 1
+    sizeIndex, sizeDirection = value.phoneSize, value.phoneSizeDirection or (if value.phoneSize == 3 then -1 else 1)
     sizeReady = true
   end
   if value.serial ~= status.serial or value.phase ~= "streaming" then

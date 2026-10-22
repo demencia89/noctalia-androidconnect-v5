@@ -23,9 +23,10 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
-from video import Child, FrameServer, preview_size
+from video import Child, FrameServer, phone_filter, phone_geometry, preview_size
 
 
 class OperationError(Exception):
@@ -127,6 +128,78 @@ def mdns_services(text):
     return services[:64]
 
 
+def normalized_host(host):
+    host = str(host).strip().strip("[]")
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return host.rstrip(".").lower()
+
+
+def transport_host(serial, services=()):
+    serial = str(serial).rstrip(".")
+    suffix = "._adb-tls-connect._tcp"
+    if serial.endswith(suffix):
+        name = serial.removesuffix(suffix)
+        hosts = {normalized_host(item["host"]) for item in services
+                 if item["type"] == "_adb-tls-connect._tcp"
+                 and item["name"].rstrip(".").removesuffix(suffix) == name}
+        return next(iter(hosts)) if len(hosts) == 1 else ""
+    host, separator, port = serial.rpartition(":")
+    return normalized_host(host) if separator and port.isascii() and port.isdigit() else ""
+
+
+def discover_services():
+    services = []
+    try:
+        services = mdns_services(run(["adb", "mdns", "services"], timeout=3))
+    except OperationError:
+        pass
+    # Same optional Avahi fallback as v4; only this service, never a port scan.
+    if shutil.which("avahi-browse"):
+        try:
+            output = run(["avahi-browse", "-rtkp", "_adb-tls-connect._tcp"], timeout=3)
+            for line in output.splitlines():
+                parts = line.split(";")
+                if len(parts) >= 9 and parts[0] == "=" and parts[4] == "_adb-tls-connect._tcp":
+                    address = endpoint(parts[7], parts[8])
+                    item = {"name": parts[3], "type": parts[4], "host": normalized_host(parts[7]),
+                            "port": parts[8], "endpoint": address}
+                    if item not in services:
+                        services.append(item)
+        except (OperationError, ValueError):
+            pass
+    return services[:64]
+
+
+def connect_wireless(hosts, cancelled, timeout):
+    """Bounded discovery for one selected phone; run off the command/input thread."""
+    wanted = {normalized_host(host) for host in hosts}
+    deadline = time.monotonic() + timeout
+    detail = "No Wireless ADB connect service was advertised. Enable Wireless debugging on the selected phone."
+    while not cancelled.is_set() and time.monotonic() < deadline:
+        services = discover_services()
+        matches = sorted({item["endpoint"] for item in services
+                          if item["type"] == "_adb-tls-connect._tcp" and normalized_host(item["host"]) in wanted})
+        for address in matches:
+            remaining = deadline - time.monotonic()
+            if cancelled.is_set():
+                return None
+            if remaining <= 0:
+                break
+            try:
+                output = run(["adb", "connect", address], timeout=min(3, remaining))
+                if "connected to" in output:
+                    return address
+                detail = output or "ADB did not confirm connection"
+            except OperationError as error:
+                detail = str(error)
+        cancelled.wait(min(1, max(0, deadline - time.monotonic())))
+    if cancelled.is_set():
+        return None
+    raise OperationError("Wireless ADB discovery timed out. " + detail)
+
+
 def unwrap(value):
     if isinstance(value, dict):
         if "type" in value and "data" in value:
@@ -160,7 +233,7 @@ def kde_path(device_id):
 
 def probe(selected, discover=False, serial=""):
     result = {"adb": [], "kde": [], "services": [], "adbError": "", "kdeAvailable": False,
-              "phone": {}, "phoneSerial": serial}
+              "phone": {}, "phoneSerial": serial, "probeSelection": selected}
     if shutil.which("adb"):
         try:
             result["adb"] = parse_adb(run(["adb", "devices", "-l"]))
@@ -172,10 +245,7 @@ def probe(selected, discover=False, serial=""):
         except OperationError as error:
             result["adbError"] = str(error)
         if discover:
-            try:
-                result["services"] = mdns_services(run(["adb", "mdns", "services"], timeout=4))
-            except OperationError:
-                pass
+            result["services"] = discover_services()
     if shutil.which("busctl"):
         try:
             ids = bus("/modules/kdeconnect", "org.kde.kdeconnect.daemon", "devices", "bb", "false", "false")
@@ -204,14 +274,21 @@ def probe(selected, discover=False, serial=""):
     return result
 
 
-def resolve_serial(devices, selected_kde, saved):
+def resolve_serial(devices, selected_kde, saved, services=()):
     authorized = [device["serial"] for device in devices if device["state"] == "device"]
+    if selected_kde is not None:
+        addresses = {normalized_host(host) for host in selected_kde.get("addresses", []) if normalized_host(host)}
+        matching = [serial for serial in authorized if transport_host(serial, services) in addresses]
+        if matching:
+            # IP and mDNS transports can both refer to this same phone.
+            return saved if saved in matching else sorted(matching, key=lambda value: ("._adb-tls-" in value, value))[0]
+        # Preserve explicit USB/mDNS identity associations, but never follow a
+        # stale IP to a different phone after a DHCP/port change.
+        if saved in authorized and not transport_host(saved, services):
+            return saved
+        return ""
     if saved:
         return saved if saved in authorized else ""
-    if selected_kde is not None:
-        addresses = selected_kde.get("addresses", [])
-        matching = [serial for serial in authorized if serial.rpartition(":")[0].strip("[]") in addresses]
-        return matching[0] if len(matching) == 1 else ""
     return authorized[0] if len(authorized) == 1 else ""
 
 
@@ -235,6 +312,8 @@ class Bridge:
         self.panel_open = False
         self.auto_suppressed = False
         self.refresh_requested = True
+        self.reconnect = None
+        self.reconnect_attempts = set()
         self.config = {"video_device": "/dev/video10", "preview_height": 720, "fps": 60, "auto_mirror": True}
         try:
             self.preferences = json.loads((data / "devices.json").read_text(encoding="utf-8"))
@@ -247,23 +326,32 @@ class Bridge:
             key: value for key, value in (profiles.items() if isinstance(profiles, dict) else [])
             if isinstance(key, str) and isinstance(value, str) and len(value) <= 256
         }
+        wireless = self.preferences.get("wireless", {})
+        self.preferences["wireless"] = {
+            key: {"host": normalized_host(value["host"])}
+            for key, value in (wireless.items() if isinstance(wireless, dict) else [])
+            if isinstance(key, str) and isinstance(value, dict) and isinstance(value.get("host"), str)
+            and 0 < len(value["host"]) <= 253
+        }
         names = self.preferences.get("names", {})
         self.preferences["names"] = {
             key: value.strip() for key, value in (names.items() if isinstance(names, dict) else [])
             if isinstance(key, str) and key.startswith(("kde:", "adb:")) and len(key) <= 300
             and isinstance(value, str) and 0 < len(value) <= 80 and value.isprintable() and value.strip()
         }
-        size = self.preferences.get("phoneSize", 1)
-        direction = self.preferences.get("phoneSizeDirection", 1)
+        size = self.preferences.get("phoneSize", 3)
+        size = size if type(size) is int and 1 <= size <= 3 else 3
+        direction = self.preferences.get("phoneSizeDirection", -1 if size == 3 else 1)
         self.model = {
             "runtime": str(runtime), "socket": str(runtime / "frames.sock"),
             "adb": [], "kde": [], "selectedKde": str(self.preferences.get("selectedKde", "")), "serial": "",
-            "phase": "idle", "error": "", "width": 244, "height": 432, "sourceWidth": 0, "sourceHeight": 0,
+            "phase": "idle", "error": "", **phone_geometry(538, 1190), "sourceWidth": 0, "sourceHeight": 0,
             "audio": True, "keepAwake": False, "dim": False, "recording": False, "busy": False,
-            "phoneSize": size if type(size) is int and 1 <= size <= 3 else 1,
-            "phoneSizeDirection": direction if type(direction) is int and direction in (-1, 1) else 1,
+            "phoneSize": size,
+            "phoneSizeDirection": direction if type(direction) is int and direction in (-1, 1) else (-1 if size == 3 else 1),
             "names": self.preferences["names"],
             "qrPath": "", "qrActive": False, "configured": False,
+            "wirelessHost": "", "wirelessPort": "", "wirelessState": "idle", "wirelessError": "",
             "tools": {name: bool(shutil.which(name)) for name in ("adb", "scrcpy", "ffmpeg", "fuser", "busctl", "qrencode")},
         }
 
@@ -279,6 +367,100 @@ class Bridge:
     def saved_serial(self):
         profiles = self.preferences.get("profiles", {})
         return profiles.get(self.model["selectedKde"] or "adb-only", "") if isinstance(profiles, dict) else ""
+
+    def selection_key(self):
+        return self.model["selectedKde"] or "adb-only"
+
+    def wireless_hosts(self):
+        device = self.selected_kde()
+        hosts = device.get("addresses", []) if device else []
+        if not hosts:
+            hosts = [self.preferences["wireless"].get(self.selection_key(), {}).get("host", "")
+                     or transport_host(self.saved_serial(), self.model.get("services", []))]
+        result = []
+        for host in hosts:
+            host = normalized_host(host)
+            try:
+                endpoint(host, "1")
+            except OperationError:
+                continue
+            if host not in result:
+                result.append(host)
+        return result[:8]
+
+    def resolved_serial(self):
+        device = self.selected_kde()
+        # A missing KDE report must never turn a selected phone into "ADB only".
+        # Saved hosts/explicit identities still work while KDE Connect is offline.
+        if device is None:
+            hosts = self.wireless_hosts()
+            if self.model["selectedKde"] or hosts:
+                device = {"addresses": hosts}
+        return resolve_serial(self.model["adb"], device, self.saved_serial(), self.model.get("services", []))
+
+    def remember_wireless(self, address):
+        host = transport_host(address)
+        if not host:
+            return
+        key = self.selection_key()
+        saved = self.preferences["profiles"].get(key, "")
+        # Keep explicit USB/mDNS identities stable when an IP alias also appears.
+        target = saved if saved and ":" not in saved else address
+        if saved != target or self.preferences["wireless"].get(key) != {"host": host}:
+            self.preferences["profiles"][key] = target
+            self.preferences["wireless"][key] = {"host": host}
+            save_json(self.data / "devices.json", self.preferences)
+        self.model.update(wirelessHost=host, wirelessPort=address.rpartition(":")[2], wirelessError="")
+
+    def cancel_reconnect(self):
+        if self.reconnect is not None:
+            self.reconnect["cancel"].set()
+            self.reconnect = None
+        self.model["wirelessState"] = "idle"
+
+    def request_reconnect(self, timeout=12, host=""):
+        hosts = self.wireless_hosts()
+        if host:
+            host = normalized_host(host)
+            endpoint(host, "1")
+            device = self.selected_kde()
+            if device and device.get("addresses") and host not in hosts:
+                raise OperationError("That host does not belong to the selected KDE Connect phone")
+            hosts = [host]
+        if not hosts or not self.model["tools"]["adb"]:
+            return
+        serial = self.model["serial"]
+        if any(item["serial"] == serial and item["state"] == "device" for item in self.model["adb"]):
+            address = transport_host(serial, self.model.get("services", []))
+            if address in hosts:
+                self.model.update(wirelessState="connected", wirelessError="")
+                return
+        self.cancel_reconnect()
+        self.reconnect_attempts.add((self.selection_key(), tuple(hosts)))
+        self.reconnect = {"key": self.selection_key(), "hosts": hosts, "timeout": timeout, "cancel": threading.Event()}
+        self.model.update(wirelessHost=hosts[0], wirelessPort="", wirelessState="scanning", wirelessError="")
+
+    def poll_reconnect(self):
+        job = self.reconnect
+        if job is None or "future" not in job or not job["future"].done():
+            return
+        self.reconnect = None
+        if job["cancel"].is_set() or job["key"] != self.selection_key() or not self.panel_open:
+            return
+        try:
+            address = job["future"].result()
+            device = self.selected_kde()
+            allowed = {normalized_host(host) for host in device.get("addresses", [])} if device else set()
+            if address and transport_host(address) in job["hosts"] and (not allowed or transport_host(address) in allowed):
+                self.remember_wireless(address)
+                self.model["wirelessState"] = "connected"
+                self.auto_suppressed = False
+                self.refresh_requested = True
+            else:
+                self.model["wirelessState"] = "idle"
+        except (OperationError, OSError, ValueError) as error:
+            self.model.update(wirelessState="timeout", wirelessError=str(error))
+        self.publish()
 
     def name_key(self):
         device = self.selected_kde()
@@ -366,8 +548,10 @@ class Bridge:
             raise OperationError("The loopback device is in use or its ownership could not be checked; reserve a free device for AndroidConnect")
         self.model.update(phase="starting", error="", sourceWidth=width, sourceHeight=height,
                           keepAwake=awake, dim=dim)
-        preview_width, preview_height = preview_size(width, height, self.config["preview_height"])
-        self.model.update(width=preview_width, height=preview_height)
+        # Keep the overall phone height unchanged, including v4's bezel.
+        preview_width, preview_height = preview_size(width, height, self.config["preview_height"] * 1190 / 1241)
+        phone = phone_geometry(preview_width, preview_height)
+        self.model.update(phone)
         self.publish()
         command = ["scrcpy", "--serial=" + serial, "--v4l2-sink=" + str(device), "--no-window",
                    "--no-clipboard-autosync", "--capture-orientation=@0", "--max-size=960", "--verbosity=info",
@@ -382,16 +566,19 @@ class Bridge:
             self.scrcpy = Child(command)
             # FrameServer retries until the loopback is available and reports
             # readiness from actual pixels, not scrcpy's buffered stdout logs.
-            video = ["ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1", "-filter_threads", "1",
-                     "-f", "v4l2", "-framerate", str(self.config["fps"]), "-i", str(device), "-an", "-vf",
-                     f"scale={preview_width}:{preview_height},format=rgba",
+            video = ["ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1", "-filter_complex_threads", "1",
+                     "-f", "v4l2", "-framerate", str(self.config["fps"]), "-i", str(device),
+                     "-threads", "1", "-i", str(Path(__file__).resolve().parent / "Assets" / "phone.png"),
+                     "-filter_complex", phone_filter(preview_width, preview_height), "-map", "[phone]", "-an",
                      "-threads", "1", "-fps_mode", "passthrough", "-f", "rawvideo", "pipe:1"]
-            self.frames = FrameServer(self.runtime / "frames.sock", video, preview_width, preview_height, self.events)
+            self.frames = FrameServer(self.runtime / "frames.sock", video, phone["width"], phone["height"], self.events)
         except Exception:
             self.stop_mirror()
             raise
 
     def set_selection(self, request):
+        self.cancel_reconnect()
+        self.cancel_qr()
         if self.recorder is not None:
             self.finish_recording()
         self.stop_mirror()
@@ -402,7 +589,7 @@ class Bridge:
                 raise OperationError("Unknown KDE Connect device")
             self.model["selectedKde"] = device_id
             self.preferences["selectedKde"] = device_id
-            self.model["serial"] = resolve_serial(self.model["adb"], self.selected_kde(), self.saved_serial())
+            self.model["serial"] = self.resolved_serial()
         if "serial" in request:
             serial = str(request["serial"])
             if serial and not any(item["serial"] == serial and item["state"] == "device" for item in self.model["adb"]):
@@ -410,6 +597,8 @@ class Bridge:
             self.preferences.setdefault("profiles", {})[self.model["selectedKde"] or "adb-only"] = serial
             self.model["serial"] = serial
         save_json(self.data / "devices.json", self.preferences)
+        hosts = self.wireless_hosts()
+        self.model.update(wirelessHost=hosts[0] if hosts else "", wirelessPort="", wirelessError="")
 
     def kde_action(self, action, request):
         device = self.selected_kde()
@@ -519,10 +708,7 @@ class Bridge:
         self.model.update(qrActive=False, qrPath="")
 
     def discover(self):
-        try:
-            return mdns_services(run(["adb", "mdns", "services"], timeout=4))
-        except OperationError:
-            return []
+        return discover_services()
 
     def wireless(self, request):
         action = request["action"]
@@ -530,6 +716,7 @@ class Bridge:
             if not shutil.which("qrencode"):
                 raise OperationError("Install qrencode for QR pairing")
             self.cancel_qr()
+            self.cancel_reconnect()
             name, secret = "ANDROIDCONNECT-" + secrets.token_hex(6), secrets.token_hex(12)
             path = str(self.runtime / ("pairing-" + secrets.token_hex(6) + ".png"))
             run(["qrencode", "-o", path, "-s", "5"],
@@ -537,6 +724,7 @@ class Bridge:
             self.qr = {"name": name, "secret": secret, "deadline": time.monotonic() + 90, "host": "", "path": path}
             self.model.update(qrActive=True, qrPath=path)
         elif action == "pairAdb":
+            self.cancel_reconnect()
             code = str(request.get("code", ""))
             if not re.fullmatch(r"[0-9]{6}", code):
                 raise OperationError("Enter the six-digit pairing code displayed by Android")
@@ -544,24 +732,23 @@ class Bridge:
             output = run(["adb", "pair", address], input=code + "\n", timeout=15)
             if "Successfully paired" not in output:
                 raise OperationError("ADB did not confirm pairing")
+            host = transport_host(address)
+            self.preferences["wireless"][self.selection_key()] = {"host": host}
+            save_json(self.data / "devices.json", self.preferences)
+            self.request_reconnect(18, host)
             self.notice("notice.paired")
         elif action == "connectAdb":
+            self.cancel_reconnect()
             address = endpoint(request.get("host", ""), request.get("port", ""))
             output = run(["adb", "connect", address], timeout=10)
             if "connected to" not in output:
                 raise OperationError(output or "ADB did not confirm connection")
+            self.remember_wireless(address)
+            self.auto_suppressed = False
+            self.model["wirelessState"] = "connected"
             self.notice("notice.connected")
         elif action == "autoConnect":
-            host = str(request.get("host", "")).strip().strip("[]")
-            endpoint(host, "1")
-            matches = {item["endpoint"] for item in self.discover()
-                       if item["type"] == "_adb-tls-connect._tcp" and item["host"] == host}
-            if len(matches) != 1:
-                raise OperationError("No unique Wireless ADB service for that host; enter its current connect port")
-            output = run(["adb", "connect", matches.pop()], timeout=10)
-            if "connected to" not in output:
-                raise OperationError(output or "ADB did not confirm connection")
-            self.notice("notice.connected")
+            self.request_reconnect(18, str(request.get("host", "")))
 
     def handle(self, request):
         action = request.get("action")
@@ -587,13 +774,21 @@ class Bridge:
             self.stop_window()
             self.panel_open = True
             self.auto_suppressed = False
+            self.cancel_reconnect()
+            self.reconnect_attempts.clear()
+            self.refresh_requested = True
+            hosts = self.wireless_hosts()
+            self.model.update(wirelessHost=hosts[0] if hosts else "", wirelessError="")
         elif action == "close":
             self.panel_open = False
+            self.cancel_reconnect()
             self.cancel_qr()
             self.finish_recording()
             self.stop_mirror()
         elif action == "select":
             self.set_selection(request)
+        elif action == "wirelessOpen":
+            self.request_reconnect(18)
         elif action == "rename":
             self.rename_device(request)
         elif action == "window":
@@ -675,7 +870,7 @@ class Bridge:
                     continue
                 if "kdeTarget" in request and request["kdeTarget"] != self.model["selectedKde"]:
                     continue
-                if request.get("action") in {"key", "gesture", "text", "screenshot", "record", "start", "audio", "keepAwake", "dim", "window", "rename"}:
+                if request.get("action") in {"key", "gesture", "text", "screenshot", "record", "start", "audio", "keepAwake", "dim", "window", "rename", "wirelessOpen", "autoConnect", "pairAdb", "connectAdb", "qr"}:
                     if not self.panel_open:
                         continue
                 self.model["busy"] = True
@@ -695,12 +890,30 @@ class Bridge:
                 self.publish()
 
     def update_probe(self, result):
+        if result.get("probeSelection", self.model["selectedKde"]) != self.model["selectedKde"]:
+            return
         self.model.update(result)
-        serial = resolve_serial(self.model["adb"], self.selected_kde(), self.saved_serial())
+        serial = self.resolved_serial()
         if serial != self.model["serial"]:
             self.finish_recording()
             self.stop_mirror()
             self.model["serial"] = serial
+            self.auto_suppressed = False
+        hosts = self.wireless_hosts()
+        if hosts:
+            self.model["wirelessHost"] = hosts[0]
+        host = transport_host(serial, self.model.get("services", []))
+        if serial and host and (not hosts or host in hosts):
+            self.cancel_reconnect()
+            address = serial if "._adb-tls-" not in serial else next(
+                (item["endpoint"] for item in self.model.get("services", [])
+                 if transport_host(serial, [item]) == host), "")
+            if address:
+                self.remember_wireless(address)
+            self.model.update(wirelessState="connected", wirelessError="")
+        elif (self.panel_open and self.model["configured"] and not serial and hosts and self.qr is None
+              and self.reconnect is None and (self.selection_key(), tuple(hosts)) not in self.reconnect_attempts):
+            self.request_reconnect()
         if self.model.get("phoneSerial") != serial:
             self.model["phone"] = {}
         if self.qr is not None:
@@ -719,6 +932,8 @@ class Bridge:
                     output = run(["adb", "connect", matches[0]["endpoint"]], timeout=10)
                     if "connected to" not in output:
                         raise OperationError(output or "ADB did not confirm connection")
+                    self.remember_wireless(matches[0]["endpoint"])
+                    self.auto_suppressed = False
                     self.cancel_qr()
                     self.notice("notice.connected")
             except OperationError as error:
@@ -727,6 +942,7 @@ class Bridge:
         self.publish()
 
     def tick(self):
+        self.poll_reconnect()
         if self.window is not None and self.window.process.poll() is not None:
             if self.window.process.returncode:
                 detail = self.window.error() or "scrcpy stopped"
@@ -762,6 +978,7 @@ class Bridge:
         if self.frames is not None and self.frames.ever_connected and self.frames.client is None:
             if time.monotonic() - self.frames.last_client > 3:
                 self.panel_open = False
+                self.cancel_reconnect()
                 self.stop_mirror()
                 self.publish()
         if (self.panel_open and self.model["configured"] and self.config["auto_mirror"] and not self.auto_suppressed
@@ -776,12 +993,15 @@ class Bridge:
     def loop(self):
         self.publish()
         # Slow device/DBus probes cannot block incoming pointer commands.
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             future = None
             next_probe = 0
             while not self.stopped:
                 self.receive()
                 self.tick()
+                if self.reconnect is not None and "future" not in self.reconnect:
+                    job = self.reconnect
+                    job["future"] = pool.submit(connect_wireless, job["hosts"], job["cancel"], job["timeout"])
                 now = time.monotonic()
                 if future is not None and future.done():
                     try:
@@ -791,12 +1011,14 @@ class Bridge:
                     future = None
                 if future is None and (now >= next_probe or self.refresh_requested):
                     self.refresh_requested = False
-                    future = pool.submit(probe, self.model["selectedKde"], self.qr is not None, self.model["serial"])
+                    future = pool.submit(probe, self.model["selectedKde"], self.panel_open or self.qr is not None, self.model["serial"])
                     next_probe = now + 5
                 time.sleep(0.05)
+            self.cancel_reconnect()
 
     def close(self):
         self.stopped = True
+        self.cancel_reconnect()
         self.cancel_qr()
         self.finish_recording()
         self.stop_mirror()

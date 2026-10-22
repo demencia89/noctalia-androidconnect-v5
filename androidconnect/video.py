@@ -184,3 +184,37 @@ class FrameServer:
 def preview_size(width, height, maximum_height):
     scale = min(360 / width, maximum_height / height, 1)
     return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+
+
+def phone_geometry(width, height):
+    """Fit v4's cropped artwork (597x1241) around its 538x1190 screen."""
+    left, right = round(width * 25 / 538), round(width * 34 / 538)
+    top, bottom = round(height * 26 / 1190), round(height * 25 / 1190)
+    return {"width": left + width + right, "height": top + height + bottom,
+            "screen": {"x": left, "y": top, "width": width, "height": height,
+                       "radius": min(width * 52 / 538, height * 52 / 1190)}}
+
+
+def phone_filter(width, height):
+    """One cached artwork/mask frame; only scale, alpha merge and overlay run live."""
+    phone = phone_geometry(width, height)
+    screen = phone["screen"]
+    left, top, radius = screen["x"], screen["y"], screen["radius"]
+
+    def coverage(x, y):
+        # Antialiased rounded-rectangle coverage at pixel centers.
+        dx = f"max(abs(X-{x + (width - 1) / 2})-{width / 2 - radius},0)"
+        dy = f"max(abs(Y-{y + (height - 1) / 2})-{height / 2 - radius},0)"
+        return f"clip({radius + 0.5}-hypot({dx},{dy}),0,1)"
+
+    return (
+        f"[1:v]scale={phone['width']}:{phone['height']},"
+        "format=rgba,split=2[art][shape];"
+        f"[art]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+        f"a='alpha(X,Y)*(1-({coverage(left, top)}))'[rim];"
+        f"[shape]scale={width}:{height},format=gray,geq=lum='255*({coverage(0, 0)})'[mask];"
+        f"[0:v]setpts=PTS-STARTPTS,scale={width}:{height},format=rgb24[video];"
+        "[video][mask]alphamerge[rounded];"
+        f"[rounded]pad={phone['width']}:{phone['height']}:{left}:{top}:color=black@0[canvas];"
+        "[canvas][rim]overlay=format=rgb:alpha=straight,format=rgba[phone]"
+    )
