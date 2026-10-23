@@ -1,8 +1,11 @@
 import base64
+import array
 import contextlib
 from concurrent.futures import Future
 import io
+import fcntl
 import json
+import mmap
 import os
 from pathlib import Path
 import queue
@@ -630,15 +633,167 @@ class WirelessTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
 
 
+class PixelClient:
+    """Test reader for the documented little-endian memfd protocol."""
+
+    def __init__(self, path):
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.socket.settimeout(5)
+        self.socket.connect(str(path))
+        self.socket.send(struct.pack("<II", 1, 1))
+        self.buffer = None
+        self.width = self.height = self.seals = None
+
+    def frame(self):
+        self.socket.send(struct.pack("<II", 2, 0))
+        message, ancillary, flags, _ = self.socket.recvmsg(16, socket.CMSG_SPACE(16), socket.MSG_CMSG_CLOEXEC)
+        assert not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        if len(message) == 16:
+            kind, buffer_id, self.width, self.height = struct.unpack("<IIII", message)
+            assert (kind, buffer_id) == (1, 0) and len(ancillary) == 1
+            level, kind, data = ancillary[0]
+            descriptors = array.array("i")
+            descriptors.frombytes(data)
+            assert (level, kind, len(descriptors)) == (socket.SOL_SOCKET, socket.SCM_RIGHTS, 1)
+            descriptor = descriptors[0]
+            try:
+                assert not os.get_inheritable(descriptor)
+                size = self.width * self.height * 4
+                assert os.fstat(descriptor).st_size == size
+                self.seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+                assert self.seals & fcntl.F_SEAL_SHRINK
+                self.buffer = mmap.mmap(descriptor, size, access=mmap.ACCESS_READ)
+            finally:
+                os.close(descriptor)
+            message, ancillary, flags, _ = self.socket.recvmsg(16, socket.CMSG_SPACE(16), socket.MSG_CMSG_CLOEXEC)
+        assert message == struct.pack("<II", 2, 0) and not ancillary
+        assert not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        return bytes(self.buffer)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.socket.close()
+        if self.buffer is not None:
+            self.buffer.close()
+
+
+class PixelProtocolTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="ac-pixels-")
+        self.path = Path(self.directory.name) / "pixels.sock"
+        with patch.object(FrameServer, "capture"):
+            self.frames = FrameServer(self.path, [], 2, 2, queue.Queue())
+        self.publish(10)
+
+    def tearDown(self):
+        self.frames.stop()
+        self.directory.cleanup()
+
+    def publish(self, value):
+        with self.frames.condition:
+            self.frames.latest = bytes([value, value, value, 255]) * 4
+            self.frames.version += 1
+            self.frames.condition.notify_all()
+
+    def test_shared_buffer_stays_unchanged_until_next_request(self):
+        with PixelClient(self.path) as client:
+            first = client.frame()
+            self.assertEqual((client.width, client.height), (2, 2))
+            self.assertEqual(first, bytes([10, 10, 10, 255]) * 4)
+            self.publish(20)
+            self.publish(30)
+            client.socket.settimeout(0.15)
+            with self.assertRaises(socket.timeout):
+                client.socket.recv(16)
+            self.assertEqual(bytes(client.buffer), first, "The shell still owns this buffer")
+            self.assertEqual(client.frame(), bytes([30, 30, 30, 255]) * 4, "Drop intermediate frames")
+
+    def test_paused_drawing_does_not_disconnect(self):
+        with PixelClient(self.path) as client:
+            first = client.frame()
+            self.publish(42)
+            client.socket.settimeout(1.1)
+            with self.assertRaises(socket.timeout):
+                client.socket.recv(16)
+            self.assertIsNotNone(self.frames.client)
+            self.assertEqual(bytes(client.buffer), first)
+            self.assertEqual(client.frame()[0], 42)
+
+    def test_reconnect_gets_current_frame_without_waiting_for_capture(self):
+        for _ in range(3):
+            with PixelClient(self.path) as client:
+                self.assertEqual(client.frame()[0], 10)
+
+    def test_invalid_messages_are_rejected_and_next_client_can_connect(self):
+        for packet, hello in ((struct.pack("<II", 2, 0), False),
+                              (struct.pack("<II", 1, 2), False),
+                              (b"short", True), (b"x" * 32, True),
+                              (struct.pack("<II", 2, 1), True),
+                              (struct.pack("<II", 1, 1), True)):
+            with self.subTest(packet=packet, hello=hello), socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+                client.settimeout(2)
+                client.connect(str(self.path))
+                if hello:
+                    client.send(struct.pack("<II", 1, 1))
+                client.send(packet)
+                self.assertEqual(client.recv(16), b"")
+        with PixelClient(self.path) as client:
+            self.assertEqual(client.frame()[0], 10)
+
+    def test_unexpected_received_descriptor_is_closed(self):
+        with tempfile.TemporaryFile() as file, socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+            client.settimeout(2)
+            client.connect(str(self.path))
+            rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [file.fileno()]))]
+            client.sendmsg([struct.pack("<II", 1, 1)], rights)
+            self.assertEqual(client.recv(16), b"")
+            os.fstat(file.fileno())  # Only the received copy should have been closed.
+        with PixelClient(self.path) as client:
+            self.assertEqual(client.frame()[0], 10)
+
+    def test_stop_unblocks_pending_request_and_cleans_socket(self):
+        with PixelClient(self.path) as client:
+            client.frame()
+            client.socket.send(struct.pack("<II", 2, 0))  # No newer frame is available.
+            self.frames.stop()
+            self.assertEqual(client.socket.recv(16), b"")
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.frames.server_thread.is_alive())
+
+    def test_existing_socket_path_is_not_replaced(self):
+        identity = self.path.stat()
+        with self.assertRaises(OSError):
+            FrameServer(self.path, [], 2, 2, queue.Queue())
+        self.assertEqual(self.path.stat().st_ino, identity.st_ino)
+
+    def test_replacement_socket_path_survives_stop(self):
+        self.path.unlink()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as other:
+            other.bind(str(self.path))
+            identity = self.path.stat()
+            self.frames.stop()
+            self.assertEqual(self.path.stat().st_ino, identity.st_ino)
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is needed for real frame tests")
 class VideoTests(unittest.TestCase):
-    def receive(self, client, count):
-        result = bytearray()
-        while len(result) < count:
-            part = client.recv(count - len(result))
-            self.assertTrue(part)
-            result.extend(part)
-        return bytes(result)
+    @unittest.skipUnless(os.environ.get("ANDROIDCONNECT_PIXEL_CONSUMER"), "Set ANDROIDCONNECT_PIXEL_CONSUMER to the upstream test reader")
+    def test_upstream_cpp_reader(self):
+        command = ["ffmpeg", "-nostdin", "-v", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=64x96:rate=60",
+                   "-vf", "format=rgba", "-threads", "1", "-f", "rawvideo", "pipe:1"]
+        with tempfile.TemporaryDirectory(prefix="ac-upstream-") as directory:
+            path = Path(directory) / "pixels.sock"
+            frames = FrameServer(path, command, 64, 96, queue.Queue())
+            try:
+                result = subprocess.run([os.environ["ANDROIDCONNECT_PIXEL_CONSUMER"], str(path)],
+                                        capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("reconnect OK", result.stdout)
+            finally:
+                frames.stop()
+
 
     def test_real_frames_reconnect_and_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="ac-video-") as directory:
@@ -649,17 +804,14 @@ class VideoTests(unittest.TestCase):
             try:
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 for _ in range(2):
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                        client.settimeout(5)
-                        client.connect(str(path))
+                    with PixelClient(path) as client:
                         for _ in range(2):
-                            client.sendall(b"R")
-                            self.assertEqual(struct.unpack("!4sII", self.receive(client, 12)), (b"NRF1", 64, 96))
-                            pixels = self.receive(client, 64 * 96 * 4)
+                            pixels = client.frame()
+                            self.assertEqual((client.width, client.height), (64, 96))
                             self.assertTrue(all(value == 255 for value in pixels[3::4]))
-                        client.settimeout(0.1)
+                        client.socket.settimeout(0.1)
                         with self.assertRaises(socket.timeout):
-                            client.recv(1)
+                            client.socket.recv(16)
             finally:
                 frames.stop()
             self.assertFalse(path.exists())
@@ -678,15 +830,11 @@ class VideoTests(unittest.TestCase):
             path = Path(directory) / "frames.sock"
             frames = FrameServer(path, command, phone["width"], phone["height"], queue.Queue())
             try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                    client.settimeout(5)
-                    client.connect(str(path))
+                with PixelClient(path) as client:
                     images = []
                     for _ in range(3):
-                        client.sendall(b"R")
-                        self.assertEqual(struct.unpack("!4sII", self.receive(client, 12)),
-                                         (b"NRF1", phone["width"], phone["height"]))
-                        pixels = self.receive(client, phone["width"] * phone["height"] * 4)
+                        pixels = client.frame()
+                        self.assertEqual((client.width, client.height), (phone["width"], phone["height"]))
                         self.assertEqual(pixels[3], 0)  # No rectangular background outside the phone.
                         center = (phone["height"] // 2 * phone["width"] + phone["width"] // 2) * 4
                         self.assertEqual(pixels[center + 3], 255)

@@ -1,5 +1,8 @@
-"""Small NRF1 producer. Capture/decoding stays outside the shell and Luau VM."""
+"""Noctalia pixel-stream producer. Capture/decoding stays outside the shell."""
 
+import array
+import fcntl
+import mmap
 import os
 from pathlib import Path
 import queue
@@ -57,7 +60,7 @@ class FrameServer:
         self.client = None
         self.last_client = time.monotonic()
         self.ever_connected = False
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         try:
             self.server.bind(str(self.path))
             os.chmod(self.path, 0o600)
@@ -116,8 +119,59 @@ class FrameServer:
                     self.emit("error", str(error))
                 return
 
+    def receive(self, client, *, deadline=None):
+        while not self.stopped.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            try:
+                data, ancillary, flags, _ = client.recvmsg(8, socket.CMSG_SPACE(16), socket.MSG_CMSG_CLOEXEC)
+            except socket.timeout:
+                continue  # A hidden control may legitimately stop requesting frames.
+            # The shell never sends descriptors. Close unexpected ones before rejecting.
+            for level, kind, value in ancillary:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                    descriptors = array.array("i")
+                    descriptors.frombytes(value[:len(value) // descriptors.itemsize * descriptors.itemsize])
+                    for descriptor in descriptors:
+                        os.close(descriptor)
+            if len(data) != 8 or ancillary or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                return None
+            return struct.unpack("<II", data)
+        return None
+
+    def stream(self, client):
+        if self.receive(client, deadline=time.monotonic() + 2) != (1, 1):  # HELLO v1
+            return
+        size = self.width * self.height * 4
+        descriptor = os.memfd_create("androidconnect-pixels", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        try:
+            os.ftruncate(descriptor, size)
+            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SEAL)
+            with mmap.mmap(descriptor, size, access=mmap.ACCESS_WRITE) as buffer:
+                sent, attached = -1, False
+                while self.receive(client) == (2, 0):  # REQUEST releases the previous buffer.
+                    with self.condition:
+                        self.condition.wait_for(
+                            lambda: self.stopped.is_set() or (self.latest is not None and sent != self.version)
+                        )
+                        if self.stopped.is_set():
+                            return
+                        pixels, sent = self.latest, self.version
+                    # Capture keeps only its latest bytes, independently of this mapping.
+                    # Never modify the shared buffer again until the next REQUEST.
+                    buffer[:] = pixels
+                    if not attached:
+                        message = struct.pack("<IIII", 1, 0, self.width, self.height)  # BUFFER 0
+                        rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor]))]
+                        if client.sendmsg([message], rights) != len(message):
+                            return
+                        attached = True
+                    if client.send(struct.pack("<II", 2, 0)) != 8:  # FRAME 0
+                        return
+        finally:
+            os.close(descriptor)
+
     def serve(self):
-        header = struct.pack("!4sII", b"NRF1", self.width, self.height)
         while not self.stopped.is_set():
             try:
                 client, _ = self.server.accept()
@@ -131,26 +185,10 @@ class FrameServer:
                     continue
                 self.client = client
                 self.ever_connected = True
-                sent = -1
-                client.settimeout(1)
+                client.settimeout(0.25)
                 try:
-                    # One requested reply only: fit a preview frame in the send
-                    # buffer so nonblocking readers need not wait between chunks.
-                    client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, min(self.width * self.height * 4 + 12, 4 * 1024 * 1024))
-                    while not self.stopped.is_set():
-                        if client.recv(1) != b"R":
-                            break
-                        with self.condition:
-                            ready = self.condition.wait_for(
-                                lambda: self.stopped.is_set() or (self.latest is not None and sent != self.version),
-                                timeout=5,
-                            )
-                            if not ready or self.stopped.is_set():
-                                break
-                            pixels, sent = self.latest, self.version
-                        client.sendall(header)
-                        client.sendall(pixels)
-                except (ConnectionError, socket.timeout, OSError):
+                    self.stream(client)
+                except (OSError, ValueError):
                     pass
                 finally:
                     self.client = None

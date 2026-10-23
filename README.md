@@ -1,23 +1,21 @@
 # AndroidConnect for Noctalia v5
 
-This is the native Luau port, version **2.2.0**, published as a development
-preview. It requires a patched Noctalia build with `ui.frame` and `panel.setSize`
-/ proposed plugin API 40:
+Version **2.3.0** uses upstream Noctalia's `ui.pixelStream` and content-sized
+panel height. It requires **plugin API 42 or newer**, including
+`height = "content"` with `max_height`. The upstream source tested is commit
+`6423cc232e5b0900f28852b97f50d2836f4d39b7`.
 
-- [Shell implementation: noctalia-dev/noctalia#4961](https://github.com/noctalia-dev/noctalia/pull/4961).
-- [Matching editor types: noctalia-dev/official-plugins#126](https://github.com/noctalia-dev/official-plugins/pull/126).
-
-These are draft proposals, not an officially released API. This plugin is not
-compatible with an unpatched Noctalia v5 release. API 40 is provisional and may
-change during upstream review. The types PR is for developer tooling, not an
-additional runtime dependency.
+No custom shell patch is needed. Your installed Noctalia build must include these
+APIs; its v5 version label alone does not establish that. The previously published
+v2.2.0 release uses the old `ui.frame` patch and is not this migration.
+See upstream's [Pixel streams documentation](https://github.com/noctalia-dev/noctalia/blob/main/docs/user/plugins/development/declarative-ui.mdx#pixel-streams).
 
 The [v4 QML plugin](https://github.com/demencia89/noctalia-shell-androidconnect-plugin)
 remains in its own repository, with independent releases and update workflow.
 
 ## Install from GitHub
 
-Run these in a session using the patched Noctalia build:
+Run these in a compatible upstream Noctalia session:
 
 ```sh
 noctalia msg plugins source add androidconnect-v5 git https://github.com/demencia89/noctalia-androidconnect-v5
@@ -59,7 +57,8 @@ recording and close the panel first so media can finish downloading.
 
 ## Dependencies and setup
 
-- `python3` runs the companion; no Python packages are required.
+- Linux and `python3` run the companion; no Python packages are required. The
+  transport uses standard-library `memfd_create`, `mmap`, and `SOCK_SEQPACKET`.
 - Install the **Adwaita Sans** font for the v4 typography. Fontconfig substitutes
   another font if it is unavailable, which can change text widths and spacing.
 - KDE Connect status/actions need a running `kdeconnectd` and `busctl`.
@@ -122,10 +121,11 @@ are still required; KDE Connect cannot enable them.
   decoded frames, not scrcpy's potentially buffered log messages.
 - The default video limit is 60 fps. FFmpeg requests that capture rate from the
   reserved V4L2 device and passes captured timestamps through without an extra
-  frame-rate conversion filter. The native reader requests its next frame as
-  soon as a reply completes; the companion sizes its bounded send buffer for
-  one complete preview frame. Only the latest frame is retained, with no video
-  backlog and no increase to the shell's 16 ms polling rate.
+  frame-rate conversion filter. The companion passes a sealed shared-memory
+  buffer descriptor, not pixel bytes, over the local socket. Noctalia requests
+  the next frame after uploading the previous one. The companion keeps only the
+  latest captured frame, never modifies a buffer still owned by the shell, and
+  tolerates paused drawing without an idle disconnect or a video backlog.
 - **Open in window** (external-window icon in the header) stops the embedded preview
   and opens an ordinary scrcpy window for the selected ADB target. The panel
   closes after spawning succeeds; launch errors are reported. The window keeps
@@ -146,7 +146,7 @@ are still required; KDE Connect cannot enable them.
   requested, rather than v4's Recents action; the Recents button is unchanged.
 - Hover the brand logo to reveal its resize icon, then click to cycle
   Small (60%) → Medium (75%) → Large (100%) → Medium → Small, as in v4.
-  The phone and panel resize without restarting the mirror. The selected size
+  The phone and panel height resize without restarting the mirror. The selected size
   and cycling direction are saved. Large is the initial default; any saved size
   takes precedence on subsequent opens/restarts. The preview-height setting defines Large.
   Navigation buttons use 32px for both Small and Medium, and the unchanged 42px
@@ -154,6 +154,10 @@ are still required; KDE Connect cannot enable them.
   spacing and side insets scale proportionally while Home stays centered.
   The main view fits its preview/navigation height with the same 21px outer
   inset as the sides; setup drawers retain extra height when needed for their controls.
+  Upstream removed `panel.setSize`; the panel therefore keeps a fixed 680px
+  width at every preset, while `height = "content"` fits its rendered height
+  up to 900px and the output's available size. Dynamic panel width would require
+  a separate upstream extension. The header and action grid fill the available width.
 - Hover the live phone preview and use the mouse wheel to scroll. Wheel/tilt
   steps become short vertical/horizontal ADB swipes near the pointer, with
   endpoints kept clear of the system bars. Rapid steps are combined and bounded;
@@ -235,7 +239,7 @@ are still required; KDE Connect cannot enable them.
   to printable ASCII; a literal `%s`
   sequence is rejected because Android treats it as a space escape.
 - Size presets resize immediately rather than reproducing v4's QML animation.
-  The shell bounds panel-size requests to the output. Capture resolution changes
+  The shell owns the fixed width and content-height limit. Capture resolution changes
   from the preview-height setting take effect on the next preview start.
 - The initial v5 translation is English. Existing v4 translations are intact.
 - Existing v4 `settings.json` is not automatically migrated. The v5 plugin keeps
@@ -248,7 +252,7 @@ are still required; KDE Connect cannot enable them.
 
 `service.luau` runs one companion; `panel.luau`, `bar.luau`, and `shortcut.luau`
 consume plugin-local shared status. `backend.py` handles fixed device actions,
-and `video.py` supplies the existing NRF1 frame protocol. There is no toolkit,
+and `video.py` supplies upstream's pixel-stream protocol version 1. There is no toolkit,
 codec, or Android logic added to the shell by the port.
 
 The companion creates a unique mode-0700 directory under a verified private
@@ -258,6 +262,15 @@ must have the same effective UID, and only the latest frame is retained. Device
 commands use direct argv; Android shell text is quoted explicitly. Input carries
 its originating target so a queued release cannot affect a newly selected phone.
 Slow device discovery runs separately from input handling.
+
+The producer validates little-endian `HELLO`/`REQUEST` packets and rejects
+unexpected descriptors or truncated messages. A connection gets one bounded
+RGBA memfd, sealed against shrinking/growing; its descriptor is sent with
+`SCM_RIGHTS`. The shared mapping is updated only after the next `REQUEST`
+returns ownership, and its memory/descriptors are released on disconnect. Idle
+connections remain valid while the shell is not drawing. Capture remains
+independent and bounded to its newest frame. Pointer and keyboard handlers use
+upstream's separate callbacks; wheel input uses the most recent pointer position.
 
 Noctalia plugins and same-user processes are trusted code; this is not a sandbox
 or isolation from other programs running as your user.
@@ -282,6 +295,41 @@ per-phone association, stale results, and closing while discovery is running.
 Socket
 tests need a normal host session rather than a sandbox that forbids Unix bind.
 The four Luau entries were also compiled with Noctalia's vendored Luau compiler.
+
+Protocol tests additionally cover buffer ownership during capture, dropping
+intermediate frames, paused drawing, reconnecting to a static frame, malformed
+packets, descriptor rejection, stopping during a pending request, and preserving
+occupied/replaced socket paths. `tests/panel_harness.luau` and
+`tests/test_panel.luau` check the actual panel's new callbacks, all three preview
+sizes, bezel mapping, text/key ordering, scroll, cancellation, and device drawers.
+
+Optional native integration checks use the Luau and pixel-stream readers from a
+Noctalia source build. From the repository root, replacing the source/build paths:
+
+```sh
+g++ -std=c++23 -O1 -pthread -I/path/to/noctalia/src \
+  tests/pixel_stream_consumer.cpp /path/to/noctalia/src/ipc/pixel_stream_client.cpp \
+  /path/to/noctalia/src/core/log.cpp -o /tmp/androidconnect-pixel-consumer
+ANDROIDCONNECT_PIXEL_CONSUMER=/tmp/androidconnect-pixel-consumer \
+  python3 -B -m unittest discover -s tests
+g++ -std=c++23 -O1 -I/path/to/noctalia/third_party/luau/Common/include \
+  -I/path/to/noctalia/third_party/luau/Ast/include \
+  -I/path/to/noctalia/third_party/luau/Compiler/include \
+  -I/path/to/noctalia/third_party/luau/VM/include \
+  tests/run_luau.cpp /path/to/noctalia/build/libluau.a -o /tmp/androidconnect-run-luau
+/tmp/androidconnect-run-luau --check androidconnect/*.luau
+/tmp/androidconnect-run-luau tests/panel_harness.luau androidconnect/panel.luau tests/test_panel.luau
+```
+
+On 2026-10-23 the migration passed all 62 Python tests with the upstream C++
+consumer enabled, plus upstream's pixel-stream client, UI reconciler, plugin
+binding, and manifest tests. The actual panel's callback suite passed in upstream's
+Luau runtime. A locally built, unmodified upstream shell displayed the Xiaomi 15
+Ultra's live video with its fitted transparent bezel; Small idle artwork and
+Large live-video layouts were inspected. Screenshots remain local. Full phone
+input/media, fractional-scaling, and latency coverage still need manual testing.
+
+## Earlier validation before the pixel-stream migration
 
 The panel was enabled and visually inspected in the user's live patched Umbriel
 session; live discovery found the ADB and KDE Connect devices, with no script/UI
@@ -310,12 +358,10 @@ size-cycle order, requested panel dimensions, right-click Back, wheel-click Home
 and cancelling an active drag on resize. Backend tests verify saved size settings
 without a mirror restart; native binding tests reject invalid resize dimensions.
 
-A 324×720 generated 60 fps source exercised the actual native socket reader and
-Python frame server. With 16 ms polling, the corrected transport delivered
-approximately 60 fps, versus approximately 10 fps with the original small socket
-buffer and non-pipelined requests. This measures transport throughput, not
-on-screen presentation or end-to-end phone latency; the compositor, phone, and
-capture path can still limit smoothness.
+The earlier transport benchmark used the removed NRF1 socket protocol; its
+throughput numbers do not establish the new implementation's presentation rate
+or end-to-end phone latency. Those still depend on the compositor, capture path,
+and phone.
 
 Still pending: broader phone input/media and QR pairing, audio, fractional
 scaling, and performance testing. The test-pattern frame path was verified in the

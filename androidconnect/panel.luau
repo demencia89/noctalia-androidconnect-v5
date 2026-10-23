@@ -10,13 +10,13 @@ local inputRevision, commandId = 0, 0
 local render
 local typedText, typingTarget, typingSince = "", "", 0
 local pendingScroll = nil
+local pointerX, pointerY = nil, nil
 local lastScrollAt = 0
 local pendingWindow = nil
 local renameKey, renameText = "", ""
 local sizeIndex, sizeDirection, sizeReady, sizeHovered = 3, -1, false, false
 local hoveredControl = nil
 local SIZE_FACTORS = { 0.60, 0.75, 1.0 }
-local SIZE_WIDTHS = { 560, 620, 680 }
 local SIZE_NAMES = { "small", "medium", "large" }
 local PANEL_INSET, HEADER_HEIGHT = 21, 64
 local SECTION_GAP, BODY_GAP = 14, 24
@@ -375,7 +375,7 @@ render = function()
   local identity = nameKey()
   local name = deviceName(identity, originalName)
   local phoneHeight = math.floor(math.clamp(noctalia.getConfig("preview_height") or 720, 240, 720) * SIZE_FACTORS[sizeIndex])
-  local panelWidth = SIZE_WIDTHS[sizeIndex]
+  local panelWidth = 680 -- Upstream owns panel width; height follows the content.
   local contentWidth = panelWidth - PANEL_INSET * 2
   local aspect = if status.screen then status.width / status.height else 597 / 1241
   local phoneWidth = math.floor(phoneHeight * aspect)
@@ -399,9 +399,12 @@ render = function()
   local phoneColumnHeight = phoneHeight + SECTION_GAP + navigationSize
   local minimumBodyHeight = if drawer == "wireless" then 620 elseif drawer then 504 else ({ 478, 586, 704 })[sizeIndex]
   local bodyHeight = math.max(phoneColumnHeight, minimumBodyHeight)
-  local frame = if streaming then ui.frame({ key = "phone", path = status.socket or "",
+  local frame = if streaming then ui.pixelStream({ key = "phone", path = status.socket or "",
     width = phoneWidth, height = phoneHeight, radius = 0,
-    onPointer = "onFramePointer", onKey = "onFrameKey",
+    onPointerDown = "onPixelDown", onPointerUp = "onPixelUp",
+    onPointerMove = "onPixelMove", onPointerCancel = "onPixelCancel",
+    onRightClick = "onPixelBack", onMiddleClick = "onPixelHome", onScroll = "onPixelScroll",
+    onTextInput = "onPixelText", onKeyEvent = "onPixelKey",
   }) else ui.image({ key = "phone-placeholder", path = "Assets/phone-idle.svg",
     width = phoneWidth, height = phoneHeight, fit = "stretch",
   })
@@ -488,7 +491,6 @@ render = function()
   end
 
   -- The host supplies 14px; v4's nested 9 + 6 + 6 margins total 21px.
-  panel.setSize(panelWidth, PANEL_INSET * 2 + HEADER_HEIGHT + SECTION_GAP + bodyHeight)
   panel.render(ui.column({ padding = PANEL_INSET - 14, gap = SECTION_GAP, align = "stretch" }, {
     ui.row({ key = "header", height = HEADER_HEIGHT, gap = 10, paddingH = 12, paddingV = 10, align = "center",
       fill = "surface_variant/0.5", radius = 22, borderWidth = 0 }, {
@@ -524,7 +526,7 @@ render = function()
         icon("actions.more", "dots", function() toggleDrawer("more") end, true, drawer == "more"),
       }),
     }),
-    ui.row({ key = "body", gap = BODY_GAP, align = "start" }, {
+    ui.row({ key = "body", height = bodyHeight, gap = BODY_GAP, align = "start" }, {
       ui.column({ key = "phone-column", width = phoneWidth, gap = SECTION_GAP, align = "center" }, {
         frame,
         ui.row({ width = phoneWidth, paddingH = phoneWidth * 0.02, gap = 0 }, {
@@ -555,6 +557,7 @@ function onOpenWindow()
   if not opened or not status.serial or status.serial == "" or status.busy then return end
   flushTyping()
   gesture, pendingScroll = nil, nil
+  pointerX, pointerY = nil, nil
   syncInputTicks()
   pendingWindow = tostring(noctalia.nowMs()) .. "-" .. tostring(commandId + 1)
   command("window", { token = pendingWindow }, true)
@@ -564,6 +567,7 @@ function onCyclePhoneSize()
   if not opened then return end
   flushTyping()
   gesture, pendingScroll = nil, nil
+  pointerX, pointerY = nil, nil
   if sizeIndex == 3 then sizeDirection = -1 elseif sizeIndex == 1 then sizeDirection = 1 end
   sizeIndex += sizeDirection
   if sizeIndex == 3 then sizeDirection = -1 elseif sizeIndex == 1 then sizeDirection = 1 end
@@ -582,6 +586,7 @@ function onOpen()
   opened = true
   pendingWindow = nil
   gesture = nil
+  pointerX, pointerY = nil, nil
   drawer = nil
   status = noctalia.state.get("status") or {}
   host = status.wirelessHost or ""
@@ -600,6 +605,7 @@ function onClose()
   hoveredControl = nil
   renameKey, renameText = "", ""
   gesture = nil
+  pointerX, pointerY = nil, nil
   code, text = "", ""
   typedText = ""
   pendingScroll = nil
@@ -612,50 +618,74 @@ function onExit()
   if opened then onClose() end
 end
 
-function onFramePointer(kind, payload)
-  if not opened then return end
-  if kind == "cancel" then gesture = nil; return end
-  local position = noctalia.json.decode(payload)
-  if type(position) ~= "table" then return end
+local function phonePosition(normX, normY, inside)
+  if not opened or status.phase ~= "streaming" then return nil end
+  local px, py = tonumber(normX), tonumber(normY)
   local screen = status.screen
-  if not screen then return end
+  if not px or not py or not screen then return nil end
   -- The streamed image includes the bezel; Android coordinates must not.
-  local x, y = position.x * status.width - screen.x, position.y * status.height - screen.y
+  local x, y = px * status.width - screen.x, py * status.height - screen.y
   local radius = screen.radius
   local dx = x - math.clamp(x, radius, screen.width - radius)
   local dy = y - math.clamp(y, radius, screen.height - radius)
-  if kind == "press" or kind == "scroll" then
-    if x < 0 or x > screen.width or y < 0 or y > screen.height or dx * dx + dy * dy > radius * radius then return end
+  if inside then
+    if x < 0 or x > screen.width or y < 0 or y > screen.height or dx * dx + dy * dy > radius * radius then return nil end
   end
-  position.x, position.y = math.clamp(x / screen.width, 0, 1), math.clamp(y / screen.height, 0, 1)
-  if kind == "scroll" then
-    if status.phase ~= "streaming" or gesture then return end
-    flushTyping()
-    local previous = pendingScroll
-    pendingScroll = {
-      x = position.x, y = position.y,
-      dx = math.clamp((previous and previous.dx or 0) + (position.dx or 0), -4, 4),
-      dy = math.clamp((previous and previous.dy or 0) + (position.dy or 0), -4, 4),
-    }
-    syncInputTicks()
-  elseif kind == "press" then
-    flushScroll()
-    flushTyping()
-    gesture = nil
-    if position.button == "right" then
-      command("key", { key = 4 }, true)
-    elseif position.button == "middle" then
-      command("key", { key = 3 }, true)
-    else
-      gesture = { x = position.x, y = position.y, time = noctalia.nowMs(), serial = status.serial }
-    end
-  elseif kind == "release" and gesture then
-    local first = gesture
-    gesture = nil
-    if first.serial ~= status.serial then return end
-    command("gesture", { points = { first.x, first.y, position.x, position.y },
-      duration = math.clamp(noctalia.nowMs() - first.time, 50, 3000) }, true)
-  end
+  return { x = math.clamp(x / screen.width, 0, 1), y = math.clamp(y / screen.height, 0, 1) }
+end
+
+function onPixelMove(x, y)
+  if not opened or status.phase ~= "streaming" then return end
+  pointerX, pointerY = tonumber(x), tonumber(y)
+end
+
+function onPixelDown(x, y)
+  gesture = nil
+  local position = phonePosition(x, y, true)
+  if not position then return end
+  flushScroll()
+  flushTyping()
+  onPixelMove(x, y)
+  gesture = { x = position.x, y = position.y, time = noctalia.nowMs(), serial = status.serial }
+end
+
+function onPixelUp(x, y)
+  local first = gesture
+  gesture = nil
+  local position = phonePosition(x, y, false)
+  if not first or not position or first.serial ~= status.serial then return end
+  command("gesture", { points = { first.x, first.y, position.x, position.y },
+    duration = math.clamp(noctalia.nowMs() - first.time, 50, 3000) }, true)
+end
+
+function onPixelCancel()
+  gesture, pendingScroll = nil, nil
+  pointerX, pointerY = nil, nil
+  syncInputTicks()
+end
+
+local function mouseKey(x, y, key)
+  if not phonePosition(x, y, true) then return end
+  flushScroll()
+  flushTyping()
+  gesture = nil
+  command("key", { key = key }, true)
+end
+
+function onPixelBack(x, y) mouseKey(x, y, 4) end
+function onPixelHome(x, y) mouseKey(x, y, 3) end
+
+function onPixelScroll(dx, dy)
+  local position = phonePosition(pointerX, pointerY, true)
+  if not position or gesture then return end
+  flushTyping()
+  local previous = pendingScroll
+  pendingScroll = {
+    x = position.x, y = position.y,
+    dx = math.clamp((previous and previous.dx or 0) + (tonumber(dx) or 0), -4, 4),
+    dy = math.clamp((previous and previous.dy or 0) + (tonumber(dy) or 0), -4, 4),
+  }
+  syncInputTicks()
 end
 
 function onSendText()
@@ -664,30 +694,31 @@ function onSendText()
   text = ""; inputRevision += 1; render()
 end
 
-function onFrameKey(kind, payload)
-  if not opened or status.phase ~= "streaming" or kind ~= "press" then return end
-  local key = noctalia.json.decode(payload)
-  if type(key) ~= "table" or key.preedit then return end
+function onPixelText(value)
+  if not opened or status.phase ~= "streaming" or value == "" then return end
   flushScroll()
-  -- KeyMod: Shift=1, Ctrl=2, Alt=4, Super=8. Text already reflects
-  -- the keyboard layout, Shift and Caps Lock; do not reconstruct it from key names.
-  if bit32.band(key.modifiers, 14) ~= 0 then
-    if key.modifiers ~= 2 or (key.sym ~= 118 and key.sym ~= 86) then return end
+  queueTyping(value)
+end
+
+function onPixelKey(chord, pressed)
+  if not opened or status.phase ~= "streaming" or pressed ~= "true" then return end
+  flushScroll()
+  -- Noctalia delivers text separately; other keys use capture_keys-style chords.
+  if string.lower(chord) == "ctrl+v" then
     flushTyping()
     local clipboard = noctalia.clipboardText()
     if clipboard and clipboard ~= "" then command("text", { text = clipboard }, true) end
     return
   end
+  chord = string.gsub(chord, "^Shift%+", "")
   local keys = {
-    [0xff08] = 67, [0xffff] = 112, [0xff0d] = 66, [0xff8d] = 66,
-    [0xff51] = 21, [0xff52] = 19, [0xff53] = 22, [0xff54] = 20,
-    [0xff50] = 122, [0xff57] = 123, [0xff55] = 92, [0xff56] = 93,
+    BackSpace = 67, Delete = 112, Return = 66, KP_Enter = 66,
+    Left = 21, Up = 19, Right = 22, Down = 20,
+    Home = 122, End = 123, Prior = 92, Next = 93, Page_Up = 92, Page_Down = 93,
   }
-  if keys[key.sym] then
+  if keys[chord] then
     flushTyping()
-    command("key", { key = keys[key.sym] }, true)
-  elseif key.utf32 and key.utf32 >= 32 and key.utf32 <= 0x10ffff then
-    queueTyping(utf8.char(key.utf32))
+    command("key", { key = keys[chord] }, true)
   end
 end
 
@@ -721,6 +752,7 @@ noctalia.state.watch("status", function(value)
   end
   if value.serial ~= status.serial or value.phase ~= "streaming" then
     gesture = nil
+    pointerX, pointerY = nil, nil
     typedText = ""
     pendingScroll = nil
     panel.setNeedsFrameTick(false)
