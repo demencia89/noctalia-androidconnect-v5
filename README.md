@@ -1,6 +1,6 @@
 # AndroidConnect for Noctalia v5
 
-Version **2.5.0** uses upstream Noctalia's `ui.pixelStream` and content-sized
+Version **2.4.1** uses upstream Noctalia's `ui.pixelStream` and content-sized
 panel height. It requires **plugin API 43 or newer**, including
 the current palette roles and `height = "content"` with `max_height`. The
 pixel-stream migration was originally
@@ -16,15 +16,6 @@ See upstream's [Pixel streams documentation](https://github.com/noctalia-dev/noc
 
 The [v4 QML plugin](https://github.com/demencia89/noctalia-shell-androidconnect-plugin)
 remains in its own repository, with independent releases and update workflow.
-
-## Changes in 2.5.0
-
-The public plugin now ships original generic phone and device illustrations with
-readable SVG sources, explicit GPL-2.0-only attribution, and a reproducible PNG.
-Manufacturer-style artwork and vendor badges without verified provenance were
-removed. Users can keep their own phone frame in a local directory using the
-`artwork_directory` setting; those files are never included in plugin updates.
-See the [custom-artwork guide](androidconnect/README.md#custom-phone-artwork).
 
 ## Changes in 2.4.1
 
@@ -168,7 +159,7 @@ are still required; KDE Connect cannot enable them.
 - Right-click the phone preview for **Back**, or click the wheel for **Home**.
   Left-click/drag still taps/swipes. Wheel-click deliberately maps to Home as
   requested, rather than v4's Recents action; the Recents button is unchanged.
-- Hover the device badge to reveal its resize icon, then click to cycle
+- Hover the brand logo to reveal its resize icon, then click to cycle
   Small (60%) → Medium (75%) → Large (100%) → Medium → Small, as in v4.
   The phone and panel height resize without restarting the mirror. The selected size
   and cycling direction are saved. Large is the initial default; any saved size
@@ -224,7 +215,7 @@ are still required; KDE Connect cannot enable them.
   characters); Reset name or an empty name restores the original. Nicknames are
   saved per KDE Connect identity or ADB serial, and appear in device selectors
   and the bar tooltip. They do not rename Android or KDE Connect, alter target
-  selection, or change the device badge. A nickname tied to a wireless ADB endpoint
+  selection, or change the brand icon. A nickname tied to a wireless ADB endpoint
   does not automatically follow a different port or USB serial.
 - Wireless pairing by code or QR, connection by port, and connect-port discovery
   restricted to the host you entered. Pairing codes/QR secrets are not saved in
@@ -233,17 +224,22 @@ are still required; KDE Connect cannot enable them.
 ## Current differences from v4
 
 - The main layout retains v4's framed phone on the left and three circular
-  navigation buttons, with a redesigned device header, compact device
+  navigation buttons, with a redesigned brand/device header, compact device
   status, and labeled quick actions on the right. It uses only Noctalia palette
   roles, including live primary-tinted hover/active states, so dark/light theme
-  and palette changes do not need plugin-specific colors. The default phone
-  and device badge are original geometric SVG illustrations; attribution and
-  source are included under `Assets/README.md`. Local custom artwork can supply
-  both the live frame and idle image without being redistributed.
-  The same screen-opening geometry is used at every preview size. FFmpeg composites
-  the live screen into the frame; outer corners remain transparent. Pointer
-  coordinates exclude the bezel, bezel clicks/scrolls are ignored, and drags
-  beyond the screen are clamped.
+  and palette changes do not need plugin-specific colors. It reuses the v4 brand
+  SVGs and cropped phone
+  artwork, fitted around the live screen using the original bezel proportions.
+  The static phone image uses dark glossy glass instead of a bright wallpaper;
+  its bezel and camera cutout are unchanged. It remains visible while disconnected,
+  starting, or in an error state, even without the companion/video dependencies. Live video replaces
+  it when ready, using the same dimensions at every panel size.
+  The existing FFmpeg companion prepares the artwork and antialiased screen mask
+  once, then composites the video without another process, frame queue, or shell
+  API change. Outer corners remain transparent; the old wallpaper is cut out of
+  the screen opening. The whole phone scales together at all three sizes while
+  retaining the preview-height setting. Pointer coordinates exclude the bezel;
+  bezel clicks/scrolls are ignored and drags beyond the screen are clamped.
   Typography uses v4's Adwaita Sans family and medium/
   bold weights, with Qt point sizes converted to native logical pixels. The
   21px outer inset and adjusted navigation sizes remain unchanged. The header

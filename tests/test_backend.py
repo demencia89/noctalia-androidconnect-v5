@@ -1,3 +1,4 @@
+import base64
 import array
 import contextlib
 from concurrent.futures import Future
@@ -26,7 +27,7 @@ from unittest.mock import Mock, patch
 PLUGIN = Path(__file__).resolve().parents[1] / "androidconnect"
 sys.path.insert(0, str(PLUGIN))
 import backend
-from video import FrameServer, artwork_paths, phone_filter, phone_geometry, preview_size
+from video import FrameServer, phone_filter, phone_geometry, preview_size
 
 
 class ParsingTests(unittest.TestCase):
@@ -86,39 +87,18 @@ USB3 offline
         self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(struct.unpack("!II", header[16:24]), (597, 1241))
 
-    def test_original_idle_artwork_has_no_embedded_or_external_images(self):
+    def test_idle_glass_preserves_artwork_and_screen_geometry(self):
         root = ET.parse(PLUGIN / "Assets" / "phone-idle.svg").getroot()
         self.assertEqual(root.get("viewBox"), "0 0 597 1241")
         nodes = {node.get("id"): node for node in root.iter() if node.get("id")}
-        self.assertFalse(list(root.iter("{http://www.w3.org/2000/svg}image")))
-        self.assertNotIn("base64", (PLUGIN / "Assets" / "phone-idle.svg").read_text())
+        image = nodes["artwork"].get("{http://www.w3.org/1999/xlink}href")
+        self.assertTrue(image.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(image.split(",", 1)[1], validate=True),
+                         (PLUGIN / "Assets" / "phone.png").read_bytes())
         screen = nodes["screen"]
         self.assertEqual([screen.get(key) for key in ("x", "y", "width", "height", "rx")],
                          ["25", "26", "538", "1190", "52"])
         self.assertEqual(screen.get("fill"), "url(#glass)")
-
-    def test_custom_artwork_uses_local_files_and_requires_the_documented_geometry(self):
-        self.assertEqual(artwork_paths()["idle"], "Assets/phone-idle.svg")
-        for invalid in ("relative/folder", "https://example.com/art", 123):
-            with self.assertRaises(ValueError):
-                artwork_paths(invalid)
-        with tempfile.TemporaryDirectory(prefix="ac-artwork-") as directory:
-            folder = Path(directory)
-            with self.assertRaises(ValueError):
-                artwork_paths(directory)
-            for name in ("phone.png", "phone-idle.svg"):
-                shutil.copyfile(PLUGIN / "Assets" / name, folder / name)
-            self.assertEqual(artwork_paths(directory), {
-                "frame": str(folder / "phone.png"), "idle": str(folder / "phone-idle.svg"),
-            })
-            self.assertEqual(sorted(p.name for p in folder.iterdir()), ["phone-idle.svg", "phone.png"])
-            (folder / "phone.png").write_bytes(b"not a PNG")
-            with self.assertRaisesRegex(ValueError, "597 by 1241"):
-                artwork_paths(directory)
-            shutil.copyfile(PLUGIN / "Assets" / "phone.png", folder / "phone.png")
-            (folder / "phone-idle.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>')
-            with self.assertRaisesRegex(ValueError, "viewBox"):
-                artwork_paths(directory)
 
     def test_endpoints(self):
         self.assertEqual(backend.endpoint("192.0.2.10", "40000"), "192.0.2.10:40000")
@@ -175,27 +155,6 @@ class CommandTests(unittest.TestCase):
         (self.path / name).write_text(json.dumps(value), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
             self.bridge.receive()
-
-    def test_custom_artwork_restarts_only_when_changed_and_invalid_config_keeps_it(self):
-        folder = self.path / "artwork"
-        folder.mkdir()
-        for name in ("phone.png", "phone-idle.svg"):
-            shutil.copyfile(PLUGIN / "Assets" / name, folder / name)
-        self.bridge.scrcpy = Mock()
-        with patch.object(self.bridge, "start_mirror") as start:
-            request = {"action": "configure", "options": {"artwork_directory": str(folder)}}
-            self.request(request)
-            start.assert_called_once_with()
-            self.assertEqual(self.bridge.model["idleArtwork"], str(folder / "phone-idle.svg"))
-            self.assertEqual(self.bridge.artwork["frame"], str(folder / "phone.png"))
-            self.request(request)
-            self.assertEqual(start.call_count, 1)
-            self.request({"action": "configure", "options": {"artwork_directory": str(folder / "missing")}})
-            self.assertEqual(self.bridge.artwork["frame"], str(folder / "phone.png"))
-            self.assertIn("Custom artwork needs", self.bridge.model["error"])
-            self.request({"action": "configure", "options": {"artwork_directory": ""}})
-            self.assertEqual(start.call_count, 2)
-            self.assertEqual(self.bridge.model["idleArtwork"], "Assets/phone-idle.svg")
 
     def test_late_input_cannot_reach_a_different_target(self):
         with patch.object(self.bridge, "handle") as handle:
@@ -361,22 +320,17 @@ class CommandTests(unittest.TestCase):
 
     def test_embedded_scrcpy_never_creates_a_window(self):
         self.assertTrue(self.bridge.model["audio"])
-        artwork = self.path / "artwork"
-        artwork.mkdir()
-        for name in ("phone.png", "phone-idle.svg"):
-            shutil.copyfile(PLUGIN / "Assets" / name, artwork / name)
         with patch("backend.shutil.which", return_value="/tool"), \
              patch("backend.Path.is_char_device", return_value=True), \
              patch("backend.os.access", return_value=True), \
-             patch("backend.adb", side_effect=["Physical size: 1080x2400", "SurfaceOrientation: 0"] * 3), \
+             patch("backend.adb", side_effect=["Physical size: 1080x2400", "SurfaceOrientation: 0"] * 2), \
              patch("backend.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), \
              patch("backend.Child") as child, patch("backend.FrameServer") as frames:
             child.return_value.error.return_value = "No video mirroring, SDK mouse disabled"
             with contextlib.redirect_stdout(io.StringIO()):
-                for audio, fps, custom in ((False, 30, ""), (True, 60, ""), (True, 30, str(artwork))):
+                for audio, fps in ((False, 30), (True, 60)):
                     self.bridge.model["audio"] = audio
                     self.bridge.config["fps"] = fps
-                    self.bridge.artwork = artwork_paths(custom)
                     self.bridge.start_mirror()
                     argv = child.call_args.args[0]
                     self.assertIn("--no-window", argv)
@@ -387,7 +341,7 @@ class CommandTests(unittest.TestCase):
                     self.assertEqual(video[video.index("-framerate") + 1], str(fps))
                     self.assertNotIn("fps=", video[video.index("-filter_complex") + 1])
                     self.assertNotIn("-loop", video)  # Artwork/masks are computed once, not per frame.
-                    self.assertIn(str(artwork / "phone.png") if custom else str(PLUGIN / "Assets" / "phone.png"), video)
+                    self.assertIn(str(PLUGIN / "Assets" / "phone.png"), video)
                     self.assertEqual(frames.call_args.args[2:4],
                                      (self.bridge.model["width"], self.bridge.model["height"]))
                     self.assertEqual(video[video.index("-fps_mode") + 1], "passthrough")
