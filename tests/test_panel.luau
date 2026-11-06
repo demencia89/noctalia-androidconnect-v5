@@ -20,6 +20,7 @@ end
 for size, height in { 432, 540, 720 } do
   testStatus.phoneSize = size
   onOpen()
+  assert(find(tree, "device-badge").props.path == "Assets/device.svg")
   local phone = find(tree, "phone")
   assert(phone.kind == "pixelStream" and phone.props.height == height)
   assert(phone.props.onPointerDown == "onPixelDown" and phone.props.onKeyEvent == "onPixelKey")
@@ -30,6 +31,9 @@ for size, height in { 432, 540, 720 } do
     statusChanged(idle)
     local placeholder = find(tree, "phone-placeholder")
     assert(placeholder.props.path == "Assets/phone-idle.svg" and placeholder.props.height == height)
+    idle.idleArtwork = "/local/custom/phone-idle.svg"
+    statusChanged(idle)
+    assert(find(tree, "phone-placeholder").props.path == idle.idleArtwork)
   end
   statusChanged(testStatus)
   local count = #commands
