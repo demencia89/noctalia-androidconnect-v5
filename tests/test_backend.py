@@ -175,6 +175,31 @@ class CommandTests(unittest.TestCase):
             self.request({"action": "key", "target": "USB1", "key": 3})
             handle.assert_not_called()
 
+    def test_unlock_works_without_kde_and_preserves_the_preview(self):
+        preview = Mock()
+        self.bridge.scrcpy = preview
+        self.bridge.model["phase"] = "streaming"
+        with patch("backend.adb", return_value="") as adb, patch.object(self.bridge, "start_mirror") as start:
+            self.request({"action": "unlock", "target": "USB1"})
+            self.assertEqual([call.args for call in adb.call_args_list], [
+                ("USB1", "shell", "input", "keyevent", 224),
+                ("USB1", "shell", "wm", "dismiss-keyguard"),
+            ])
+            start.assert_not_called()
+        preview.stop.assert_not_called()
+        self.assertIs(self.bridge.scrcpy, preview)
+        self.assertEqual(self.bridge.model["phase"], "streaming")
+
+    def test_unlock_requires_an_open_panel_and_the_current_authorized_target(self):
+        with patch("backend.adb", return_value="") as adb:
+            self.request({"action": "unlock", "target": "USB2"})
+            self.bridge.panel_open = False
+            self.request({"action": "unlock", "target": "USB1"})
+            self.bridge.panel_open = True
+            self.bridge.model["adb"][0]["state"] = "unauthorized"
+            self.request({"action": "unlock", "target": "USB1"})
+            adb.assert_not_called()
+
     def test_window_requests_require_an_open_panel_and_current_target(self):
         with patch.object(self.bridge, "start_window") as start:
             self.request({"action": "window", "target": "USB2", "token": "late"})
@@ -462,6 +487,59 @@ class WirelessTests(unittest.TestCase):
         self.phone()
         self.bridge.model.update(kde=[], adb=[{"serial": "192.0.2.20:40000", "state": "device"}])
         self.assertEqual(self.bridge.resolved_serial(), "")
+
+    def test_offline_kde_phone_matches_saved_host_with_new_adb_port(self):
+        self.phone()
+        self.bridge.preferences["profiles"]["phone1"] = "192.0.2.10:39999"
+        self.bridge.preferences["wireless"]["phone1"] = {"host": "192.0.2.10"}
+        offline = [{"id": "phone1", "addresses": [], "paired": True, "reachable": False}]
+        for kde in (offline, []):
+            for serial in ("192.0.2.10:40001", "adb-phone._adb-tls-connect._tcp"):
+                with self.subTest(kde_present=bool(kde), serial=serial):
+                    self.update(kde=kde, services=[self.service()], adb=[
+                        {"serial": "192.0.2.20:40000", "state": "device"},
+                        {"serial": serial, "state": "device"},
+                    ])
+                    self.assertEqual(self.bridge.model["serial"], serial)
+                    self.assertEqual(self.bridge.model["selectedKde"], "phone1")
+                    with patch.object(self.bridge, "start_mirror") as start:
+                        self.bridge.tick()
+                        start.assert_called_once_with()
+
+    def test_kde_disconnect_does_not_stop_an_active_adb_preview(self):
+        self.phone()
+        serial = "192.0.2.10:40001"
+        self.update(adb=[{"serial": serial, "state": "device"}])
+        self.bridge.model["phase"] = "streaming"
+        with patch.object(self.bridge, "stop_mirror") as stop:
+            self.update(kde=[{"id": "phone1", "addresses": [], "paired": True, "reachable": False}])
+            stop.assert_not_called()
+        self.assertEqual(self.bridge.model["serial"], serial)
+        self.assertEqual(self.bridge.model["phase"], "streaming")
+
+    def test_offline_kde_reconnect_starts_preview_after_authorization(self):
+        self.phone()
+        self.bridge.preferences["profiles"]["phone1"] = "192.0.2.10:39999"
+        self.update(kde=[{"id": "phone1", "addresses": [], "paired": True, "reachable": False}])
+        self.assertEqual(self.bridge.reconnect["hosts"], ["192.0.2.10"])
+        self.finish("192.0.2.10:40001")
+        self.update(adb=[{"serial": "192.0.2.10:40001", "state": "device"}])
+        self.assertEqual(self.bridge.model["serial"], "192.0.2.10:40001")
+        with patch.object(self.bridge, "start_mirror") as start:
+            self.bridge.tick()
+            start.assert_called_once_with()
+
+    def test_offline_kde_phone_does_not_take_an_unrelated_adb_target(self):
+        self.phone()
+        self.bridge.preferences["wireless"]["phone1"] = {"host": "192.0.2.10"}
+        self.update(kde=[{"id": "phone1", "addresses": [], "paired": True, "reachable": False}], adb=[
+            {"serial": "192.0.2.20:40000", "state": "device"},
+            {"serial": "192.0.2.10:40001", "state": "unauthorized"},
+        ])
+        self.assertEqual(self.bridge.model["serial"], "")
+        with patch.object(self.bridge, "start_mirror") as start:
+            self.bridge.tick()
+            start.assert_not_called()
 
     def test_discovery_retries_and_only_connects_the_selected_host(self):
         clock = SimpleNamespace(now=0)

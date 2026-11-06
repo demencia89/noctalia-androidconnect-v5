@@ -3,10 +3,15 @@
 Android device status, KDE Connect actions, and interactive scrcpy control in a
 native Noctalia panel. KDE Connect is optional for ADB control and mirroring.
 
-Version **2.3.0** requires Noctalia **plugin API 42 or newer**, with upstream
+Version **2.4.0** requires Noctalia **plugin API 42 or newer**, with upstream
 `ui.pixelStream` and content-sized panel height. No custom shell patch is needed;
 older v5 builds and the former `ui.frame` patch are not compatible.
 See upstream's [Pixel streams documentation](https://github.com/noctalia-dev/noctalia/blob/main/docs/user/plugins/development/declarative-ui.mdx#pixel-streams).
+
+The header provides Wake and unlock over authorized ADB and direct access to
+the device picker. Saved wireless associations keep working when KDE Connect
+is offline or the wireless ADB port changes. Secure phone locks still require
+Android authentication.
 
 The three preview-size presets remain saved. Panel height follows the content;
 panel width is fixed at 680px because upstream does not provide `panel.setSize`.

@@ -43,7 +43,7 @@
     "ring": "Find phone", "browse": "Browse files", "send_file": "Send file",
     "file_path": "Local file path to send", "screenshot": "Screenshot", "record": "Record",
     "stop_recording": "Stop recording", "keep_awake": "Keep awake", "dim": "Screen off",
-    "audio": "Audio", "wake": "Wake", "stop_mirror": "Stop preview", "start_mirror": "Start preview",
+    "audio": "Audio", "wake": "Wake", "unlock": "Wake and unlock", "stop_mirror": "Stop preview", "start_mirror": "Start preview",
     "type_text": "Text to type on Android", "send_text": "Send text", "wireless": "Wireless",
     "refresh": "Refresh devices", "settings": "Settings", "close": "Close"
   },

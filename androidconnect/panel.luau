@@ -319,7 +319,6 @@ local function drawerContent(width, device, active)
         contentAlign = "start", controlSize = "sm", enabled = enabled ~= false, onClick = action })
     end
     return {
-      item("actions.devices", "devices", function() toggleDrawer("devices") end),
       item("actions.browse", "folder", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
       item("actions.send_file", "send", function() toggleDrawer("share") end, kdeReady),
       item("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
@@ -519,6 +518,8 @@ render = function()
         }),
       }),
       ui.row({ key = "header-actions", gap = 6, align = "center" }, {
+        icon("actions.unlock", "lock-open", function() command("unlock", nil, true) end, active and not status.busy),
+        icon("actions.devices", "devices", function() toggleDrawer("devices") end, true, drawer == "devices"),
         icon("actions.open_window", "external-link", onOpenWindow, active and not status.busy),
         icon("actions.audio", if status.audio then "volume" else "volume-off",
           function() command("audio", nil, true) end, active),

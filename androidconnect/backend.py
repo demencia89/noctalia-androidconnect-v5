@@ -389,13 +389,11 @@ class Bridge:
         return result[:8]
 
     def resolved_serial(self):
-        device = self.selected_kde()
-        # A missing KDE report must never turn a selected phone into "ADB only".
-        # Saved hosts/explicit identities still work while KDE Connect is offline.
-        if device is None:
-            hosts = self.wireless_hosts()
-            if self.model["selectedKde"] or hosts:
-                device = {"addresses": hosts}
+        # Match against the same live-or-saved hosts used for reconnection, even
+        # when KDE lists the phone without reachable addresses. A selected phone
+        # must still never fall back to an unrelated authorized ADB target.
+        hosts = self.wireless_hosts()
+        device = {"addresses": hosts} if self.model["selectedKde"] or hosts else None
         return resolve_serial(self.model["adb"], device, self.saved_serial(), self.model.get("services", []))
 
     def remember_wireless(self, address):
@@ -804,6 +802,11 @@ class Bridge:
             self.model[action] = not self.model[action]
             if self.scrcpy is not None:
                 self.start_mirror()
+        elif action == "unlock":
+            serial = self.serial()
+            adb(serial, "shell", "input", "keyevent", 224)
+            # Android prompts for authentication when the keyguard is secure.
+            adb(serial, "shell", "wm", "dismiss-keyguard")
         elif action == "key":
             key = int(request.get("key", -1))
             if key not in {3, 4, 19, 20, 21, 22, 24, 25, 26, 61, 66, 67, 82, 92, 93, 112, 122, 123, 187, 224}:
@@ -870,7 +873,7 @@ class Bridge:
                     continue
                 if "kdeTarget" in request and request["kdeTarget"] != self.model["selectedKde"]:
                     continue
-                if request.get("action") in {"key", "gesture", "text", "screenshot", "record", "start", "audio", "keepAwake", "dim", "window", "rename", "wirelessOpen", "autoConnect", "pairAdb", "connectAdb", "qr"}:
+                if request.get("action") in {"key", "gesture", "text", "unlock", "screenshot", "record", "start", "audio", "keepAwake", "dim", "window", "rename", "wirelessOpen", "autoConnect", "pairAdb", "connectAdb", "qr"}:
                     if not self.panel_open:
                         continue
                 self.model["busy"] = True

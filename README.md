@@ -1,9 +1,12 @@
 # AndroidConnect for Noctalia v5
 
-Version **2.3.0** uses upstream Noctalia's `ui.pixelStream` and content-sized
+Version **2.4.0** uses upstream Noctalia's `ui.pixelStream` and content-sized
 panel height. It requires **plugin API 42 or newer**, including
-`height = "content"` with `max_height`. The upstream source tested is commit
-`6423cc232e5b0900f28852b97f50d2836f4d39b7`.
+`height = "content"` with `max_height`. The pixel-stream migration was originally
+tested against upstream commit
+`6423cc232e5b0900f28852b97f50d2836f4d39b7`. Version 2.4.0 was also confirmed
+working by the user on packaged Noctalia 5.4.1 with Umbriel after returning
+from the local development shell.
 
 No custom shell patch is needed. Your installed Noctalia build must include these
 APIs; its v5 version label alone does not establish that. The previously published
@@ -100,6 +103,10 @@ the plugin to a disconnected endpoint. Explicit USB associations remain valid;
 it never guesses USB identity from a device name. KDE Connect is still optional:
 ADB-only mode selects a single authorized phone automatically and shows a chooser
 only for multiple targets or an unavailable saved target.
+If KDE Connect is disconnected or reports no reachable addresses, a previously
+matched phone still mirrors using its saved wireless host or explicit ADB
+association. Wireless port changes are rediscovered without requiring KDE
+Connect to reconnect.
 
 Opening the panel starts a bounded 12-second wireless reconnect attempt when the
 selected phone has no ADB connection. Opening **Wireless** prefills that phone's
@@ -186,8 +193,12 @@ are still required; KDE Connect cannot enable them.
   Unpairing requires a second confirmation click. Battery percentage uses the theme's
   error color below 20%, primary accent above 95%, and normal text otherwise
   (also when unknown). Charging is labeled separately.
-- The quieter header keeps Open in window, Audio, Wireless, and **More** visible.
-  **More** contains device selection/pairing, file browsing/sharing, Find phone,
+- The header keeps **Wake and unlock**, **Devices**, Open in window, Audio,
+  Wireless, and **More** visible. Wake and unlock uses the selected authorized
+  ADB connection without restarting the preview or requiring KDE Connect. Android
+  still requires authentication for a secure lock screen. **Devices** opens the
+  device selection/pairing drawer directly.
+  **More** contains file browsing/sharing, Find phone,
   text input, diagnostics, and settings. Wireless and send-file controls have
   their own drawers. These replace the status column while open,
   leaving the phone preview and navigation in place.
@@ -328,6 +339,12 @@ Luau runtime. A locally built, unmodified upstream shell displayed the Xiaomi 15
 Ultra's live video with its fitted transparent bezel; Small idle artwork and
 Large live-video layouts were inspected. Screenshots remain local. Full phone
 input/media, fractional-scaling, and latency coverage still need manual testing.
+
+For v2.4.0, the Python suite ran 68 tests: 67 passed, with the optional
+upstream C++ reader test skipped because its executable was unavailable.
+The packaged Noctalia 5.4.1 plugin linter reported no errors or warnings.
+The user confirmed the current plugin works after a fresh login with packaged
+Noctalia 5.4.1 and Umbriel; this does not replace the broader device testing below.
 
 ## Earlier validation before the pixel-stream migration
 
