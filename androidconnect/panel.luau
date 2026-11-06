@@ -119,8 +119,8 @@ local function icon(key, glyph, action, enabled, active, size, glyphSize)
   return ui.column({
     key = key, width = size, height = size, minWidth = size, minHeight = size,
     align = "center", justify = "center", radius = size / 2,
-    fill = if active then "primary/0.18" elseif hovered then "primary/0.10" else "surface_variant/0.55",
-    border = if active then "primary/0.4" elseif hovered then "primary/0.25" else "outline/0.22", borderWidth = 1,
+    fill = if active then "primary/0.18" elseif hovered then "primary/0.10" else "surface_container/0.55",
+    border = if active then "primary/0.4" elseif hovered then "primary/0.25" else "outline_variant/0.22", borderWidth = 1,
     opacity = if allowed then 1 else 0.6, tooltip = tr(key),
     onClick = if allowed then action else nil,
     onHover = if allowed then "onControlHover" else nil,
@@ -179,7 +179,7 @@ local function metric(glyph, title, value, color, detail)
   end
   return ui.row({ key = title, height = ({ 46, 60, 76 })[sizeIndex], gap = 12, align = "center" }, {
     ui.column({ width = badgeSize, height = badgeSize, minWidth = badgeSize,
-      align = "center", justify = "center", radius = math.round(badgeSize * 0.3), fill = "surface_variant/0.65",
+      align = "center", justify = "center", radius = math.round(badgeSize * 0.3), fill = "surface_container/0.65",
     }, {
       ui.glyph({ name = glyph, size = math.round(badgeSize * 0.52), color = "primary" }),
     }),
@@ -196,14 +196,14 @@ local function quickAction(key, glyph, action, enabled, active)
   local badgeSize = ({ 30, 36, 44 })[sizeIndex]
   return ui.column({ key = key, flexGrow = 1, minWidth = 0, height = ({ 70, 86, 108 })[sizeIndex],
     padding = 8, gap = 6, align = "center", justify = "center", radius = 18,
-    fill = if active then "primary/0.14" elseif hovered then "primary/0.08" else "surface_variant/0.45",
-    border = if active then "primary/0.4" elseif hovered then "primary/0.22" else "outline/0.16", borderWidth = 1,
+    fill = if active then "primary/0.14" elseif hovered then "primary/0.08" else "surface_container/0.45",
+    border = if active then "primary/0.4" elseif hovered then "primary/0.22" else "outline_variant/0.16", borderWidth = 1,
     opacity = if allowed then 1 else 0.5, tooltip = tr(key),
     onClick = if allowed then action else nil,
     onHover = if allowed then "onControlHover" else nil,
   }, {
     ui.column({ width = badgeSize, height = badgeSize, radius = badgeSize / 2,
-      fill = if active then "primary/0.22" elseif hovered then "primary/0.14" else "surface_variant/0.65",
+      fill = if active then "primary/0.22" elseif hovered then "primary/0.14" else "surface_container/0.65",
       align = "center", justify = "center",
     }, {
       ui.glyph({ name = glyph, size = math.round(badgeSize * 0.56),
@@ -322,7 +322,7 @@ local function drawerContent(width, device, active)
       item("actions.browse", "folder", function() command("browse", { kdeTarget = device and device.id }) end, kdeReady),
       item("actions.send_file", "send", function() toggleDrawer("share") end, kdeReady),
       item("actions.ring", "radar", function() command("ring", { kdeTarget = device and device.id }) end, kdeReady),
-      ui.separator({ color = "outline/0.18" }),
+      ui.separator({ color = "outline_variant/0.18" }),
       item("actions.type_text", "keyboard", function() toggleDrawer("text") end, active),
       item("actions.diagnostics", "info-circle", function() toggleDrawer("info") end),
       item("actions.settings", "settings", function() noctalia.openSettings() end),
@@ -422,7 +422,7 @@ render = function()
     }
     for _, child in drawerContent(rightWidth - 24, device, active) do table.insert(children, child) end
     info = ui.column({ key = "drawer", width = rightWidth, padding = 12, gap = 10, radius = 18,
-      fill = "surface_variant/0.4", border = "outline/0.2", borderWidth = 1 }, children)
+      fill = "surface_container/0.4", border = "outline_variant/0.2", borderWidth = 1 }, children)
   else
     local telemetry = if kdeReady then device else (status.phone or {})
     local battery = telemetry.battery or -1
@@ -449,7 +449,7 @@ render = function()
     local children = {
       ui.column({ key = "device-status", gap = 8 }, {
         sectionTitle("sections.device_status"),
-        ui.separator({ color = "outline/0.18", spacing = 0 }),
+        ui.separator({ color = "outline_variant/0.18", spacing = 0 }),
         ui.column({ gap = 6 }, metrics),
       }),
       ui.column({ key = "quick-actions", gap = 10 }, {
@@ -471,9 +471,9 @@ render = function()
         maxWidth = rightWidth, color = "error" }))
     end
     local footer = ui.column({ key = "preview-status", gap = 10 }, {
-      ui.separator({ color = "outline/0.18", spacing = 0 }),
+      ui.separator({ color = "outline_variant/0.18", spacing = 0 }),
       ui.row({ gap = 8, align = "center" }, {
-        ui.box({ width = 6, height = 6, radius = 3, fill = if streaming then "primary" else "outline/0.6" }),
+        ui.box({ width = 6, height = 6, radius = 3, fill = if streaming then "primary" else "outline_variant/0.6" }),
         label({ text = (if streaming then tr("status.live_preview") .. " · " else "")
           .. tr(if status.audio then "status.audio_on" else "status.audio_off"),
           fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
@@ -492,7 +492,7 @@ render = function()
   -- The host supplies 14px; v4's nested 9 + 6 + 6 margins total 21px.
   panel.render(ui.column({ padding = PANEL_INSET - 14, gap = SECTION_GAP, align = "stretch" }, {
     ui.row({ key = "header", height = HEADER_HEIGHT, gap = 10, paddingH = 12, paddingV = 10, align = "center",
-      fill = "surface_variant/0.5", radius = 22, borderWidth = 0 }, {
+      fill = "surface_container/0.5", radius = 22, borderWidth = 0 }, {
       ui.column({ key = "phone-size", width = 34, height = 34, align = "center", justify = "center",
         onClick = "onCyclePhoneSize", onHover = "onSizeHover",
         tooltip = tr("size.tooltip") .. " " .. tr("size." .. SIZE_NAMES[sizeIndex])
@@ -512,7 +512,7 @@ render = function()
         label({ text = name, fontSize = if sizeIndex == 1 then 21 else 24,
           fontWeight = "bold", color = "on_surface", maxLines = 1 }),
         ui.row({ gap = 6, align = "center" }, {
-          ui.box({ width = 5, height = 5, radius = 2.5, fill = if active or kdeReady then "primary" else "outline" }),
+          ui.box({ width = 5, height = 5, radius = 2.5, fill = if active or kdeReady then "primary" else "outline_variant" }),
           label({ text = tr(if active then "status.adb_connected" elseif kdeReady then "status.kde_connected" else "status.disconnected"),
             fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
         }),

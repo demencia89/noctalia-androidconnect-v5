@@ -1,8 +1,9 @@
 # AndroidConnect for Noctalia v5
 
-Version **2.4.0** uses upstream Noctalia's `ui.pixelStream` and content-sized
-panel height. It requires **plugin API 42 or newer**, including
-`height = "content"` with `max_height`. The pixel-stream migration was originally
+Version **2.4.1** uses upstream Noctalia's `ui.pixelStream` and content-sized
+panel height. It requires **plugin API 43 or newer**, including
+the current palette roles and `height = "content"` with `max_height`. The
+pixel-stream migration was originally
 tested against upstream commit
 `6423cc232e5b0900f28852b97f50d2836f4d39b7`. Version 2.4.0 was also confirmed
 working by the user on packaged Noctalia 5.4.1 with Umbriel after returning
@@ -15,6 +16,13 @@ See upstream's [Pixel streams documentation](https://github.com/noctalia-dev/noc
 
 The [v4 QML plugin](https://github.com/demencia89/noctalia-shell-androidconnect-plugin)
 remains in its own repository, with independent releases and update workflow.
+
+## Changes in 2.4.1
+
+The plugin directory matches the [community-store submission](https://github.com/noctalia-dev/community-plugins/pull/1311):
+current palette roles (`surface_container` and `outline_variant`), plugin API 43,
+complete command dependencies, store tags, expanded documentation, and privacy-masked
+artwork. Phone controls and video transport are unchanged from 2.4.0.
 
 ## Install from GitHub
 

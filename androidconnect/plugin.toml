@@ -1,13 +1,13 @@
 id = "demencia89/androidconnect"
 name = "AndroidConnect"
-version = "2.4.0"
-plugin_api = 42
+version = "2.4.1"
+plugin_api = 43
 author = "demencia89"
 license = "GPL-2.0-only"
 icon = "device-mobile"
 description = "Android status, KDE Connect actions, and an interactive scrcpy preview using upstream pixel streams."
-tags = ["android", "kdeconnect", "scrcpy", "utility"]
-dependencies = ["python3", "adb", "scrcpy", "ffmpeg", "fuser"]
+tags = ["hardware", "media", "network", "panel", "utility", "video"]
+dependencies = ["python3", "adb", "scrcpy", "ffmpeg", "fuser", "busctl", "qrencode", "avahi-browse", "xdg-open", "xdg-user-dir"]
 
 [[service]]
 id = "devices"
