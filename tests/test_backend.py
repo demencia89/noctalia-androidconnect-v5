@@ -991,6 +991,27 @@ class CompanionTests(unittest.TestCase):
         self.assertTrue(line, "Companion exited unexpectedly")
         return json.loads(line)
 
+    def test_service_reload_waits_for_previous_companion(self):
+        with tempfile.TemporaryDirectory(prefix="ac-handoff-") as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            env = dict(os.environ, XDG_RUNTIME_DIR=directory, PATH="/nonexistent")
+            command = [sys.executable, "-B", "-u", str(PLUGIN / "backend.py"), "--data", str(data), "--wait-for-lock"]
+            with (data / "companion.lock").open("a") as previous:
+                fcntl.flock(previous, fcntl.LOCK_EX)
+                process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                try:
+                    ready, _, _ = select.select([process.stdout], [], [], 0.4)
+                    self.assertFalse(ready, "Replacement exited or published before the lock was released")
+                    fcntl.flock(previous, fcntl.LOCK_UN)
+                    self.assertEqual(self.read_event(process)["kind"], "status")
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(previous, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    process.terminate()
+                    process.communicate(timeout=10)
+
     def test_private_start_commands_single_instance_and_shutdown(self):
         with tempfile.TemporaryDirectory(prefix="ac-companion-") as directory:
             root = Path(directory)

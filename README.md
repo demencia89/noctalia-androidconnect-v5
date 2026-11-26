@@ -25,6 +25,10 @@ selected wireless phone has a known host, AndroidConnect starts reconnecting
 without waiting for a full discovery pass. Preview startup also checks display
 size and orientation in one ADB request.
 
+The revised 2.4.2 package outlines the header, Device Status icons, and Quick
+Actions icons. On a plugin reload, the new companion waits for the previous
+one to release its lock before it takes over the device connection.
+
 ## Changes in 2.4.1
 
 The plugin directory matches the [community-store submission](https://github.com/noctalia-dev/community-plugins/pull/1311):
