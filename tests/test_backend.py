@@ -311,7 +311,7 @@ class CommandTests(unittest.TestCase):
         with patch("backend.shutil.which", return_value="/tool"), \
              patch("backend.Path.is_char_device", return_value=True), \
              patch("backend.os.access", return_value=True), \
-             patch("backend.adb", side_effect=["Physical size: 1080x2400", "SurfaceOrientation: 0"]), \
+             patch("backend.adb", return_value="Physical size: 1080x2400\nSurfaceOrientation: 0"), \
              patch("backend.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"1234", b"")), \
              patch("backend.Child") as child:
             with self.assertRaisesRegex(backend.OperationError, "in use"):
@@ -323,7 +323,7 @@ class CommandTests(unittest.TestCase):
         with patch("backend.shutil.which", return_value="/tool"), \
              patch("backend.Path.is_char_device", return_value=True), \
              patch("backend.os.access", return_value=True), \
-             patch("backend.adb", side_effect=["Physical size: 1080x2400", "SurfaceOrientation: 0"] * 2), \
+             patch("backend.adb", return_value="Physical size: 1080x2400\nSurfaceOrientation: 0") as display_probe, \
              patch("backend.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), \
              patch("backend.Child") as child, patch("backend.FrameServer") as frames:
             child.return_value.error.return_value = "No video mirroring, SDK mouse disabled"
@@ -332,6 +332,9 @@ class CommandTests(unittest.TestCase):
                     self.bridge.model["audio"] = audio
                     self.bridge.config["fps"] = fps
                     self.bridge.start_mirror()
+                    self.assertEqual(display_probe.call_count, 1)
+                    display_probe.assert_called_with("USB1", "shell", "wm size && dumpsys input")
+                    display_probe.reset_mock()
                     argv = child.call_args.args[0]
                     self.assertIn("--no-window", argv)
                     self.assertEqual("--no-audio" in argv, not audio)
@@ -380,6 +383,58 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.bridge.model["serial"], "")
         self.bridge.set_selection({"kde": "phone1"})
         self.assertEqual(self.bridge.model["serial"], "USB1")
+
+    def test_reselecting_current_target_preserves_preview_and_recording(self):
+        self.bridge.model.update(selectedKde="phone1", kde=[{"id": "phone1"}], phase="streaming")
+        with patch.object(self.bridge, "stop_mirror") as stop, \
+             patch.object(self.bridge, "finish_recording") as finish, \
+             patch.object(self.bridge, "cancel_reconnect") as cancel:
+            self.bridge.set_selection({"kde": "phone1"})
+            self.bridge.set_selection({"serial": "USB1"})
+            stop.assert_not_called()
+            finish.assert_not_called()
+            cancel.assert_not_called()
+        self.assertEqual(self.bridge.model["phase"], "streaming")
+        self.assertEqual(self.bridge.saved_serial(), "USB1")
+
+    def test_invalid_selection_preserves_working_target(self):
+        self.bridge.model.update(selectedKde="phone1", kde=[{"id": "phone1"}, {"id": "phone2"}], phase="streaming")
+        before = json.dumps(self.bridge.preferences, sort_keys=True)
+        with patch.object(self.bridge, "stop_mirror") as stop, \
+             patch.object(self.bridge, "cancel_reconnect") as cancel:
+            for request in ({"kde": "missing"}, {"kde": "phone2", "serial": "missing"}):
+                with self.assertRaises(backend.OperationError):
+                    self.bridge.set_selection(request)
+            stop.assert_not_called()
+            cancel.assert_not_called()
+        self.assertEqual((self.bridge.model["selectedKde"], self.bridge.model["serial"], self.bridge.model["phase"]),
+                         ("phone1", "USB1", "streaming"))
+        self.assertEqual(json.dumps(self.bridge.preferences, sort_keys=True), before)
+
+    def test_switch_publishes_new_target_before_teardown(self):
+        self.bridge.model.update(phase="streaming", phone={"battery": 42}, phoneSerial="USB1")
+        self.bridge.model["adb"].append({"serial": "USB2", "state": "device"})
+        published = []
+        with patch.object(self.bridge, "publish", side_effect=lambda: published.append(dict(self.bridge.model))), \
+             patch.object(self.bridge, "stop_mirror", side_effect=lambda: self.assertEqual(len(published), 1)):
+            self.bridge.set_selection({"serial": "USB2"})
+        self.assertEqual((published[0]["serial"], published[0]["phase"], published[0]["phone"]),
+                         ("USB2", "idle", {}))
+
+    def test_switch_back_retries_wireless_without_waiting_for_probe(self):
+        self.bridge.model.update(configured=True, selectedKde="phone1", serial="", kde=[
+            {"id": "phone1", "addresses": ["192.0.2.10"]},
+            {"id": "phone2", "addresses": ["192.0.2.11"]},
+        ])
+        self.bridge.model["tools"]["adb"] = True
+        self.bridge.reconnect_attempts.add(("phone1", ("192.0.2.10",)))
+        with patch.object(self.bridge, "publish"), patch("backend.run") as run:
+            self.bridge.set_selection({"kde": "phone2"})
+            first = self.bridge.reconnect
+            self.bridge.set_selection({"kde": "phone1"})
+            run.assert_not_called()
+        self.assertTrue(first["cancel"].is_set())
+        self.assertEqual(self.bridge.reconnect["hosts"], ["192.0.2.10"])
 
     def test_initial_size_is_large_and_every_user_choice_is_remembered(self):
         self.assertEqual((self.bridge.model["phoneSize"], self.bridge.model["phoneSizeDirection"]), (3, -1))
@@ -625,8 +680,10 @@ class WirelessTests(unittest.TestCase):
         job = self.bridge.reconnect
         self.bridge.set_selection({"kde": "phone2"})
         self.assertTrue(job["cancel"].is_set())
-        self.assertIsNone(self.bridge.reconnect)
+        replacement = self.bridge.reconnect
+        self.assertEqual(replacement["key"], "phone2")
         self.update(probeSelection="phone1", adb=[{"serial": "192.0.2.10:40001", "state": "device"}])
+        self.assertIs(self.bridge.reconnect, replacement)
         self.assertEqual(self.bridge.model["serial"], "")
         self.assertEqual(self.bridge.model["selectedKde"], "phone2")
         self.bridge.request_reconnect()

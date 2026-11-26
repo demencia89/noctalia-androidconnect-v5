@@ -1,6 +1,6 @@
 # AndroidConnect for Noctalia v5
 
-Version **2.4.1** uses upstream Noctalia's `ui.pixelStream` and content-sized
+Version **2.4.2** uses upstream Noctalia's `ui.pixelStream` and content-sized
 panel height. It requires **plugin API 43 or newer**, including
 the current palette roles and `height = "content"` with `max_height`. The
 pixel-stream migration was originally
@@ -16,6 +16,14 @@ See upstream's [Pixel streams documentation](https://github.com/noctalia-dev/noc
 
 The [v4 QML plugin](https://github.com/demencia89/noctalia-shell-androidconnect-plugin)
 remains in its own repository, with independent releases and update workflow.
+
+## Changes in 2.4.2
+
+Reselecting the current phone keeps its preview and any recording running.
+Switching phones updates the panel before the previous preview stops. When the
+selected wireless phone has a known host, AndroidConnect starts reconnecting
+without waiting for a full discovery pass. Preview startup also checks display
+size and orientation in one ADB request.
 
 ## Changes in 2.4.1
 
